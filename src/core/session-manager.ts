@@ -117,6 +117,20 @@ export class SessionManager {
   }
 
   /**
+   * Every bound chat whose target DSH session matches. In multi-bot mode a
+   * single session can be bound to several bot chats at once (e.g. two bots
+   * driving the same GUI conversation); outbound routing must then fan out to
+   * all of them instead of silently picking one.
+   */
+  byBoundSessionIds(sessionId: string): BoundChat[] {
+    const out: BoundChat[] = []
+    for (const entry of this.bound.values()) {
+      if (entry.sessionId === sessionId) out.push(entry)
+    }
+    return out
+  }
+
+  /**
    * Send user text into the bound chat's existing DSH session. Prefers the
    * live agent in this process (web GUI conversation); falls back to resuming
    * the session when its agent is not currently running.

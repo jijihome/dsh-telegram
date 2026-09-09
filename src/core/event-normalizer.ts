@@ -18,13 +18,20 @@
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
+/**
+ * A turn-terminating status that is NOT a clean success. The plugin surfaces
+ * each interruption cause as a distinct line so the bot always learns why a
+ * turn ended (cancel / error / blocked / token ceiling / crash-orphaned).
+ */
+export type TerminalStatus = 'cancelled' | 'error' | 'blocked' | 'max-tokens' | 'interrupted'
+
 /** One normalized outbound message for the renderer/delivery. */
 export type NormalizedMessage =
   | { kind: 'text-delta'; text: string }
   | { kind: 'reasoning-delta'; text: string }
   | { kind: 'tool-call-delta'; name: string; argumentsDelta: string }
-  | { kind: 'assistant-final'; text: string }
-  | { kind: 'status'; status: 'running' | 'done' | 'cancelled' | 'error'; detail?: string }
+  | { kind: 'assistant-final'; text: string; interrupted?: boolean }
+  | { kind: 'status'; status: 'running' | 'done' | TerminalStatus; detail?: string }
   | { kind: 'approval'; summary: string }
   | { kind: 'user-message'; text: string }
 
@@ -57,11 +64,11 @@ export function normalizeSessionEvent(event: SessionEvent): NormalizedMessage | 
   switch (event.type) {
     case 'turn/start':
       return { kind: 'status', status: 'running' }
-    case 'turn/end': {
-      // turn/end carries no success flag on this version; the final
-      // assistant/message marks completion, and errors surface separately.
-      return { kind: 'status', status: 'done' }
-    }
+    case 'turn/end':
+      // `turn/end` carries the authoritative `reason` (completed / aborted /
+      // blocked / error / max-tokens / interrupted). Map it so interruption
+      // causes surface instead of being flattened into "done".
+      return normalizeTurnEndReason(event.data.reason) ?? { kind: 'status', status: 'done' }
     case 'user/message': {
       const text = extractUserText(event)
       if (text === undefined) return undefined
@@ -70,11 +77,69 @@ export function normalizeSessionEvent(event: SessionEvent): NormalizedMessage | 
     case 'assistant/message': {
       const text = extractAssistantText(event)
       if (text === undefined) return undefined
-      return { kind: 'assistant-final', text }
+      // `interrupted: true` marks a partial answer from a turn cancelled
+      // mid-stream; keep the delivered prefix but flag it.
+      return { kind: 'assistant-final', text, interrupted: event.data.interrupted === true }
     }
     default:
       return undefined
   }
+}
+
+/**
+ * Map a `turn/end` reason to a status message. Returns **undefined** for a
+ * clean `completed` (the caller then emits `done`), and a specific status for
+ * every interruption cause. Unknown reasons are treated leniently as success.
+ */
+function normalizeTurnEndReason(reason: unknown): NormalizedMessage | undefined {
+  const kind = (reason as { kind?: string } | undefined)?.kind
+  switch (kind) {
+    case 'completed':
+    case undefined:
+    case null:
+      return undefined
+    case 'aborted':
+      return { kind: 'status', status: 'cancelled', detail: cancelCauseLabel((reason as { reason?: unknown }).reason) }
+    case 'error':
+      return { kind: 'status', status: 'error', detail: errorMessage((reason as { error?: unknown }).error) }
+    case 'blocked':
+      return { kind: 'status', status: 'blocked' }
+    case 'max-tokens':
+      return { kind: 'status', status: 'max-tokens' }
+    case 'interrupted':
+      return { kind: 'status', status: 'interrupted' }
+    default:
+      // Unknown future reason type: surface as a clean end rather than explode.
+      return undefined
+  }
+}
+
+/** Human label for the `aborted` cancellation cause (user / parent / hook / disposed). */
+function cancelCauseLabel(cause: unknown): string {
+  const kind = (cause as { kind?: string } | undefined)?.kind
+  switch (kind) {
+    case 'user': return '用户 /stop 取消'
+    case 'parent': return '父级取消'
+    case 'hook': return '钩子取消'
+    case 'disposed': return 'agent 已释放'
+    case 'legacy': return '取消'
+    default: return '取消'
+  }
+}
+
+/** Flatten a failure to a short message (LlmFailure has `message` and `code`). */
+function errorMessage(error: unknown): string {
+  const e = (error ?? undefined)
+  if (e instanceof Error) return errorMessage(e.message)
+  if (typeof e === 'string') return e
+  if (e !== null && typeof e === 'object') {
+    const obj = e as { message?: unknown; code?: unknown }
+    const message = typeof obj.message === 'string' ? obj.message : ''
+    const code = typeof obj.code === 'string' ? obj.code : ''
+    if (message !== '' && code !== '') return `${message} (${code})`
+    return message || code || '未知错误'
+  }
+  return '未知错误'
 }
 
 /** Concatenated text blocks of the assistant message content. */

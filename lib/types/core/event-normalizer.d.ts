@@ -16,6 +16,12 @@
  */
 import type { StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
+/**
+ * A turn-terminating status that is NOT a clean success. The plugin surfaces
+ * each interruption cause as a distinct line so the bot always learns why a
+ * turn ended (cancel / error / blocked / token ceiling / crash-orphaned).
+ */
+export type TerminalStatus = 'cancelled' | 'error' | 'blocked' | 'max-tokens' | 'interrupted';
 /** One normalized outbound message for the renderer/delivery. */
 export type NormalizedMessage = {
     kind: 'text-delta';
@@ -30,9 +36,10 @@ export type NormalizedMessage = {
 } | {
     kind: 'assistant-final';
     text: string;
+    interrupted?: boolean;
 } | {
     kind: 'status';
-    status: 'running' | 'done' | 'cancelled' | 'error';
+    status: 'running' | 'done' | TerminalStatus;
     detail?: string;
 } | {
     kind: 'approval';

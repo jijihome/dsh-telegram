@@ -64,6 +64,13 @@ export class Delivery {
   private readonly logger: DeliveryOptions['logger'] | undefined
   private readonly forwardLogPath: string | undefined
   private readonly live = new Map<number, LiveSegment>()
+  /**
+   * Per chat: whether the current turn's final answer has already been surfaced
+   * to Telegram (either streamed into a live message and finalized, or carried
+   * by a `turn/end` cleanup). Prevents `assistant-final` from re-sending the
+   * same answer as a second message. Reset on the next `turn/start`.
+   */
+  private readonly answered = new Map<number, boolean>()
 
   constructor(options: DeliveryOptions) {
     this.client = options.client
@@ -152,6 +159,37 @@ export class Delivery {
     return Promise.resolve()
   }
 
+  /** Reset the per-chat "answer delivered" flag for a fresh turn (`turn/start`). */
+  resetStream(chatId: number): void {
+    this.answered.set(chatId, false)
+  }
+
+  /**
+   * Finalize the answer once the turn's `assistant/message` arrives. Whenever
+   * the reply was already streamed into a live message (text/reasoning
+   * deltas), that live message IS the answer — so we flush any tail, mark it
+   * delivered, and do **not** send a duplicate `assistant-final` message.
+   * Returns `true` when the answer was surfaced (caller must not re-send),
+   * `false` when nothing was live (caller sends the final text fresh).
+   */
+  async finalizeLive(chatId: number): Promise<boolean> {
+    if (this.answered.get(chatId) === true) return true
+    const seg = this.live.get(chatId)
+    if (seg === undefined) return false
+    if (seg.timer !== undefined) {
+      clearTimeout(seg.timer)
+      seg.timer = undefined
+    }
+    // Push any tail that is not yet visible into the live message, then drop
+    // live state. The streamed live message now carries the whole answer.
+    if (seg.buffer.length > 0 && seg.lastText !== this.htmlOf(seg.buffer)) {
+      await this.flushSegment(chatId)
+    }
+    this.live.delete(chatId)
+    this.answered.set(chatId, true)
+    return true
+  }
+
   /**
    * End a live stream: push any un-flushed tail into the live message (or
    * send it when no live message exists yet), then drop live state.
@@ -167,10 +205,15 @@ export class Delivery {
       if (seg.messageId === undefined) {
         // Nothing visible yet: deliver the whole segment as a final message.
         await this.sealSegment(chatId, seg)
+        this.answered.set(chatId, true)
       } else if (seg.lastText !== this.htmlOf(seg.buffer)) {
         // Live message already visible: push the remaining tail into it.
         await this.flushSegment(chatId)
+        this.answered.set(chatId, true)
       }
+    } else if (seg.messageId !== undefined) {
+      // Live message already shows the streamed content; mark it delivered.
+      this.answered.set(chatId, true)
     }
     this.live.delete(chatId)
   }

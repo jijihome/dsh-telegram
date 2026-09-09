@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeChunk, normalizeSessionEvent } from '../core/event-normalizer.js'
 import type { NormalizedMessage } from '../core/event-normalizer.js'
+import { renderStatus } from '../core/renderer.js'
 import type { SessionManager } from '../core/session-manager.js'
 import type { Delivery } from '../telegram/delivery.js'
 
@@ -34,6 +35,13 @@ export class StreamListener {
   private readonly deliveries: ReadonlyMap<string, Delivery>
   private readonly logger: StreamListenerOptions['logger'] | undefined
   private disposer: (() => void) | undefined
+  /**
+   * Per-session last turn already reported as a terminal status. Both
+   * `agent/error` and `turn/end(reason:error)` can fire for the same turn, and
+   * forwarding both would double-notify the bot. Keyed by session id because
+   * turn numbers are monotonic within a session and reset across `/new`.
+   */
+  private readonly terminalReported = new Map<string, number>()
 
   constructor(options: StreamListenerOptions) {
     this.ctx = options.ctx
@@ -51,14 +59,39 @@ export class StreamListener {
         this.logger?.warn(`[tg] session event handling failed: ${String(error)}`)
       }
     }, { global: true })
-    // Agent-level diagnostics: driver state transitions and errors are NOT
+    // Agent-level diagnostics: driver status transitions and errors are NOT
     // part of session/event — kick() swallows turn failures into agent/error.
+    // `agent/status` is a diagnostic only; interruption causes arrive through
+    // `turn/end.reason` (authoritative) and `agent/error` (fallback for errors
+    // without an in-turn position).
     this.ctx.on('agent/status', (payload: { agent?: { session?: Session }; status: string }) => {
       const sessionId = String(payload.agent?.session?.id ?? '?')
       this.logger?.warn(`[tg] agent/status ${payload.status} for ${sessionId}`)
     })
-    this.ctx.on('agent/error', (payload: { turn?: number; step?: number; error: unknown }) => {
-      this.logger?.warn(`[tg] agent/error turn=${payload.turn ?? '-'} step=${payload.step ?? '-'}: ${String(payload.error)}`)
+    // Forward a live agent failure to the bot. Dedup against a later
+    // turn/end(error) so the same turn is not reported twice.
+    this.ctx.on('agent/error', (payload: { agent?: { session?: Session }; turn?: number; error?: unknown }) => {
+      const sessionId = String(payload.agent?.session?.id ?? '')
+      const turn = payload.turn ?? -1
+      if (sessionId === '') {
+        this.logger?.warn(`[tg] agent/error without session: ${String(payload.error)}`)
+        return
+      }
+      if (this.terminalReported.get(sessionId) === turn) {
+        this.logger?.warn(`[tg] agent/error ${sessionId}#${turn} already reported; skipping`)
+        return
+      }
+      const routes = this.resolveRoutes(sessionId)
+      if (routes.length === 0) {
+        this.logger?.warn(`[tg] agent/error for unbound ${sessionId}#${turn}; logging only`)
+        return
+      }
+      this.terminalReported.set(sessionId, turn)
+      this.logger?.warn(`[tg] agent/error ${sessionId}#${turn}: ${String(payload.error)}`)
+      for (const route of routes) {
+        const delivery = this.deliveries.get(route.botId)
+        if (delivery !== undefined) void this.applyAgentFailure(route.chatId, delivery, errorText(payload.error))
+      }
     })
   }
 
@@ -70,33 +103,12 @@ export class StreamListener {
   }
 
   private handle(session: Session, event: SessionEvent): void {
-    // Route by our own per-chat binding first, then by config session binding
-    // (a bot chat bound to an existing DSH session, e.g. a web conversation).
-    const binding = this.sessions.bySessionId(String(session.id))
-    let chatId: number | undefined
-    let botId: string | undefined
-    if (binding !== undefined) {
-      chatId = binding.chatId
-      botId = binding.botId
-    } else {
-      const bound = this.sessions.byBoundSessionId(String(session.id))
-      if (bound !== undefined) {
-        chatId = bound.chatId
-        // A bare-chatId binding (botId '') applies to any bot: resolve it to
-        // the single configured bot, or to nothing when there are several.
-        botId = bound.botId !== ''
-          ? bound.botId
-          : (this.deliveries.size === 1 ? this.deliveries.keys().next().value : undefined)
-        if (botId === undefined) {
-          this.logger?.warn(`[tg] bound session ${String(session.id)} has no unique bot; skipping (multi-bot)`)
-          return
-        }
-      }
-    }
-    if (chatId === undefined || botId === undefined) {
+    const sessionId = String(session.id)
+    const routes = this.resolveRoutes(sessionId)
+    if (routes.length === 0) {
       // Diagnostic: session events we are not bound to (noise), logged once
       // per distinct session id to avoid flooding.
-      this.logger?.warn(`[tg] unbound session event ${event.type} for ${String(session.id)}`)
+      this.logger?.warn(`[tg] unbound session event ${event.type} for ${sessionId}`)
       return
     }
     // Trace the important lifecycle events through the bound path so the
@@ -105,26 +117,73 @@ export class StreamListener {
     const type: string = event.type
     if (type === 'turn/start' || type === 'turn/end' ||
         type === 'assistant/message' || type === 'step/start' ||
-        type === 'step/end' || type === 'session/error' ||
-        type === 'turn/error') {
-      this.logger?.warn(`[tg] event ${type} for ${String(session.id)}`)
+        type === 'step/end') {
+      this.logger?.warn(`[tg] event ${type} for ${sessionId}`)
     }
-    const delivery = this.deliveries.get(botId)
-    if (delivery === undefined) return
 
     // 1. Chunk events drive the live streaming segment.
     if (event.type === 'assistant/chunk') {
       const chunk = (event.data as { chunk?: unknown }).chunk as never
       const message: NormalizedMessage | undefined = normalizeChunk(chunk)
       if (message === undefined) return
-      void this.apply(chatId, delivery, message)
+      for (const route of routes) {
+        const delivery = this.deliveries.get(route.botId)
+        if (delivery !== undefined) void this.apply(route.chatId, delivery, message)
+      }
       return
     }
 
     // 2. All other events: normalize then dispatch.
     const message = normalizeSessionEvent(event)
     if (message === undefined) return
-    void this.apply(chatId, delivery, message)
+    // A terminal `turn/end` (cancel/error/…) also fires `agent/error` for the
+    // same turn; record the report once so the bot is not notified twice.
+    if (type === 'turn/end' && message.kind === 'status' && message.status !== 'done') {
+      const turn = (event.data as { turn?: number }).turn ?? -1
+      if (this.terminalReported.get(sessionId) === turn) {
+        this.logger?.warn(`[tg] turn/end ${sessionId}#${turn} already reported; skipping`)
+        return
+      }
+      this.terminalReported.set(sessionId, turn)
+    }
+    for (const route of routes) {
+      const delivery = this.deliveries.get(route.botId)
+      if (delivery !== undefined) void this.apply(route.chatId, delivery, message)
+    }
+  }
+
+  /**
+   * Resolve a DSH session id to every bound (chatId, botId) route. Consults the
+   * plugin's own per-chat bindings first, then config session bindings. A bare
+   * chatId binding (botId '') applies only when there is a single configured
+   * bot; in multi-bot mode the config must use `botId:chatId` keys so outbound
+   * reaches the right bot(s).
+   */
+  private resolveRoutes(sessionId: string): Array<{ chatId: number; botId: string }> {
+    const binding = this.sessions.bySessionId(sessionId)
+    if (binding !== undefined) return [{ chatId: binding.chatId, botId: binding.botId }]
+    const routes: Array<{ chatId: number; botId: string }> = []
+    for (const bound of this.sessions.byBoundSessionIds(sessionId)) {
+      if (bound.botId !== '') {
+        routes.push({ chatId: bound.chatId, botId: bound.botId })
+        continue
+      }
+      // Bare binding: applies to any bot. Single-bot → resolve to that bot;
+      // multi-bot → no unique target outbound, skip this entry.
+      if (this.deliveries.size === 1) {
+        const onlyBot = this.deliveries.keys().next().value
+        if (onlyBot !== undefined) routes.push({ chatId: bound.chatId, botId: onlyBot })
+      } else {
+        this.logger?.warn(`[tg] bound session ${sessionId} has no unique bot (bare binding, multi-bot); skipping`)
+      }
+    }
+    return routes
+  }
+
+  /** End the live segment and report an agent-level failure to the bot. */
+  private async applyAgentFailure(chatId: number, delivery: Delivery, detail: string): Promise<void> {
+    await delivery.endLive(chatId)
+    await delivery.sendFinal(chatId, `⚠️ 步骤出错: ${detail}`)
   }
 
   /** Apply one normalized message to the chat's delivery. */
@@ -143,14 +202,23 @@ export class StreamListener {
         // switch" config option will let the user choose which kinds to send.
         break
       case 'assistant-final':
-        await delivery.endLive(chatId)
-        await delivery.sendFinal(chatId, message.text)
+        // The answer may already have been streamed into the live message
+        // (text/reasoning deltas). If so, that message IS the answer — flush
+        // any tail and do NOT send a duplicate final message.
+        if (!(await delivery.finalizeLive(chatId))) {
+          await delivery.sendFinal(chatId, message.interrupted ? `⛔ [已中断] ${message.text}` : message.text)
+        }
         break
       case 'status':
         if (message.status === 'running') {
           await delivery.typing(chatId)
+          delivery.resetStream(chatId)
         } else if (message.status === 'done') {
           await delivery.endLive(chatId)
+        } else {
+          // Terminal interruption: flush any live partial, then report the cause.
+          await delivery.endLive(chatId)
+          await delivery.sendFinal(chatId, renderStatus(message.status, message.detail))
         }
         break
       case 'approval':
@@ -165,4 +233,18 @@ export class StreamListener {
         break
     }
   }
+}
+
+/** Flatten an arbitrary thrown/LlmFailure error into a short message. */
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error !== null && typeof error === 'object') {
+    const obj = error as { message?: unknown; code?: unknown }
+    const message = typeof obj.message === 'string' ? obj.message : ''
+    const code = typeof obj.code === 'string' ? obj.code : ''
+    if (message !== '' && code !== '') return `${message} (${code})`
+    return message || code || '未知错误'
+  }
+  return String(error ?? '未知错误')
 }

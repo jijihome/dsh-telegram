@@ -36,8 +36,10 @@ export type { AgentFactoryLike } from './harness/agent-factory.js'
 export { SessionManager } from './core/session-manager.js'
 export { StateStore } from './core/state-store.js'
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js'
-export type { NormalizedMessage } from './core/event-normalizer.js'
+export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js'
 export { markdownToHtml, splitMessage, escapeHtml } from './core/format.js'
+export { renderMessage, renderStatus } from './core/renderer.js'
+export type { RenderState } from './core/renderer.js'
 
 /** Services the plugin depends on at runtime. */
 export const inject = ['agents']
@@ -78,9 +80,17 @@ export function apply(ctx: Context, config: TelegramConfig) {
     // this map is filled after bot start. See below for the wiring note.
   }
 
-  // Register any config session bindings: bot chat ↔ existing DSH session.
-  const bindings = config.bindings ?? {}
-  for (const [key, sessionId] of Object.entries(bindings)) {
+  // Register config session bindings: bot chat ↔ existing DSH session.
+  // Intuitive form: `bindings` nested under each bot, keyed by bare chatId.
+  for (const bot of bots) {
+    const botBindings = bot.bindings ?? {}
+    for (const [chatId, sessionId] of Object.entries(botBindings)) {
+      sessions.bind(Number(chatId), bot.id, sessionId, defaultCwd)
+    }
+  }
+  // Legacy top-level `bindings` (any bot / `botId:chatId` composite keys).
+  const legacyBindings = config.bindings ?? {}
+  for (const [key, sessionId] of Object.entries(legacyBindings)) {
     const sep = key.lastIndexOf(':')
     const hasBotPrefix = sep > 0 && /^\d+$/.test(key.slice(sep + 1))
     if (hasBotPrefix) {

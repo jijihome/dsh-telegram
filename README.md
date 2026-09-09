@@ -12,6 +12,7 @@ Telegram 桥接插件,让 DeepSeek Harness (dsh) 的 agent 通过 Telegram 使�
   - 推理增量:`reasoning-delta` 流入同一条消息
   - 工具调用:`tool-call-delta` 显示工具名 + 参数增量
   - 最终消息、运行/完成状态、取消、错误
+- **会话中断捕获**:不再把 `turn/end` 一律当「完成」——按 `reason` 区分并通知 bot:`⛔ 已取消(用户/父级/钩子/释放)`、`❌ 错误(带 message/code)`、`🔒 已阻塞`、`⏳ 输出 token 超限`、`⚠️ 会话中断(崩溃/遗留)`;`agent/error`(无回合内位置)也会转发;同一回合 `agent/error` + `turn/end(error)` 去重只通知一次
 - **每 chat 独立 agent 会话**:session id = `telegram:<botId>:<chatId>`,`/new` 轮换新会话
 - **命令系统**:`/start` `/help` `/new` `/clear` `/stop` `/workspace` `/session`
 - **持久化**:chat↔session 绑定、工作目录、长轮询 offset 存 `<cwd>/data/state.json`,重启后自动恢复(会话经 `ctx.agents.resume` 续接,offset 不重复拉取)
@@ -45,14 +46,20 @@ dsh --profile <name> --dump-config | grep telegram
   bots:
     - id: bot-a
       token: 'AAA...'
+      bindings:            # 可选:该 bot 的 chat ↔ 已经存在的 DSH 会话
+        '123456789': 'session-<uuid>'
     - id: bot-b
       token: 'BBB...'
+      bindings:
+        '123456789': 'session-<uuid>'
   allowedUserIds: [123456789]   # 只允许这些 Telegram user id
 ```
 
+> `bindings` 把某个 Telegram chat 绑定到一个**已经存在的** DSH 会话(比如 GUI 会话 `session-<uuid>`),实现双向:bot 消息直入该会话、会话出站实时推回 bot。多 bot 时把 chat 直接写在各 bot 的 `bindings` 下(键 = chatId,省略 bot 前缀);旧的顶层 `bindings`(`botId:chatId` 复合键/裸 chatId)仍兼容。
+
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `bots` | `[]` | Bot 数组;`[{ id, token }]` |
+| `bots` | `[]` | Bot 数组;`[{ id, token, bindings? }]` |
 | `token` | - | 单 Bot 简写;与 `bots` 二选一 |
 | `allowedUserIds` | `[]` | 允许的 Telegram 用户 id;空 = 拒绝所有人 |
 | `allowAllUsers` | `false` | 放行所有用户(仅开发) |
@@ -62,6 +69,7 @@ dsh --profile <name> --dump-config | grep telegram
 | `pollingTimeoutSec` | `30` | 长轮询超时(秒) |
 | `workspaceRoots` | `[cwd]` | /workspace 可浏览的根目录 |
 | `dataDir` | `<cwd>/data` | 持久化目录 |
+| `bots[].bindings` | - | 该 bot 的 chatId → 已存在 DSH 会话(双向绑定) |
 
 ## 命令
 
@@ -101,6 +109,8 @@ src/
 ### 事件流(实测 dsh 0.1.2-rc.1)
 
 插件订阅全局 `session/event`,事件带 `session.id`;只处理属于本插件创建的 session。增量来源是 `assistant/chunk` 事件(`data.chunk` = StreamChunk:`text-delta` / `reasoning-delta` / `tool-call-delta`)。注意 `agent/assistant-stream` 在 headless profile 不触发(实测),因此不依赖它。
+
+回合结束状态取自 `turn/end` 的 `reason` 字段(`completed / aborted / blocked / error / max-tokens / interrupted`);`assistant/message` 带 `interrupted: true` 表示中途中止的部分结果;`agent/error` 作为「无回合内位置错误」的兜底,与 `turn/end(error)` 通过会话内回合号去重,避免同一回合重复通知。
 
 ## 开发
 

@@ -5,7 +5,7 @@
  * @module core/renderer
  */
 
-import type { NormalizedMessage } from './event-normalizer.js'
+import type { NormalizedMessage, TerminalStatus } from './event-normalizer.js'
 
 /** Per-chat live rendering state: reasoning/tool buffers that accompany the text stream. */
 export interface RenderState {
@@ -39,23 +39,37 @@ export function renderMessage(message: NormalizedMessage, state: RenderState): s
     }
     case 'assistant-final':
       state.toolName = undefined
-      return message.text
+      return message.interrupted ? `⛔ [已中断] ${message.text}` : message.text
     case 'status':
-      switch (message.status) {
-        case 'running':
-          return '⏳ agent 开始运行…'
-        case 'done':
-          return '✅ 完成'
-        case 'cancelled':
-          return '⛔ 已取消'
-        case 'error':
-          return `❌ 错误${message.detail ? `: ${message.detail}` : ''}`
-      }
-      break
+      return renderStatus(message.status, message.detail)
     case 'approval':
       return `🔐 审批:${message.summary}`
     case 'user-message':
       return `🧑 {quote}${message.text}`
+  }
+}
+
+/**
+ * Render a status line for a turn-lifecycle signal. Running/done are the
+ * non-interrupting states; every terminal status carries its own emoji so the
+ * bot reader can tell the interruption cause at a glance.
+ */
+export function renderStatus(status: 'running' | 'done' | TerminalStatus, detail?: string): string {
+  switch (status) {
+    case 'running':
+      return '⏳ agent 开始运行…'
+    case 'done':
+      return '✅ 完成'
+    case 'cancelled':
+      return `⛔ 已取消${detail ? `: ${detail}` : ''}`
+    case 'error':
+      return `❌ 错误${detail ? `: ${detail}` : ''}`
+    case 'blocked':
+      return '🔒 已阻塞(未产生输出)'
+    case 'max-tokens':
+      return '⏳ 输出已达 token 上限'
+    case 'interrupted':
+      return '⚠️ 会话中断(未正常结束)'
   }
 }
 

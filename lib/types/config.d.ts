@@ -9,6 +9,12 @@ export interface BotConfig {
     id: string;
     /** Bot token from @BotFather. */
     token: string;
+    /**
+     * Per-bot session binding: chatId → existing DSH session, so this bot's chat
+     * participates in that conversation bidirectionally. The chat id is keyed
+     * directly under the bot (no `botId:chatId` prefix needed).
+     */
+    bindings?: Record<string, string>;
 }
 /** dsh-telegram plugin config. */
 export interface TelegramConfig {

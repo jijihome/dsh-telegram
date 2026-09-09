@@ -33,6 +33,13 @@ export declare class Delivery {
     private readonly logger;
     private readonly forwardLogPath;
     private readonly live;
+    /**
+     * Per chat: whether the current turn's final answer has already been surfaced
+     * to Telegram (either streamed into a live message and finalized, or carried
+     * by a `turn/end` cleanup). Prevents `assistant-final` from re-sending the
+     * same answer as a second message. Reset on the next `turn/start`.
+     */
+    private readonly answered;
     constructor(options: DeliveryOptions);
     /** Append the exact text about to be sent/edited to the forward log file. */
     private logForward;
@@ -50,6 +57,17 @@ export declare class Delivery {
      * in-place edit. Seals (and re-sends) segments that outgrow the cap.
      */
     appendDelta(chatId: number, delta: string): Promise<void>;
+    /** Reset the per-chat "answer delivered" flag for a fresh turn (`turn/start`). */
+    resetStream(chatId: number): void;
+    /**
+     * Finalize the answer once the turn's `assistant/message` arrives. Whenever
+     * the reply was already streamed into a live message (text/reasoning
+     * deltas), that live message IS the answer — so we flush any tail, mark it
+     * delivered, and do **not** send a duplicate `assistant-final` message.
+     * Returns `true` when the answer was surfaced (caller must not re-send),
+     * `false` when nothing was live (caller sends the final text fresh).
+     */
+    finalizeLive(chatId: number): Promise<boolean>;
     /**
      * End a live stream: push any un-flushed tail into the live message (or
      * send it when no live message exists yet), then drop live state.
