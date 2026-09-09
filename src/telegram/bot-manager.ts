@@ -152,9 +152,16 @@ export class BotManager {
     const { delivery, bot: cfg } = runtime
     const text = message.text ?? ''
 
-    // /menu shows the inline keyboard menu.
+    // /menu shows the inline keyboard menu with the status summary on top.
     if (/^\/(menu)$/.test(text.trim())) {
-      await delivery.sendMenu(chatId, mainMenuText(), mainMenuKeyboard())
+      const menuCtx = this.options.menuCtxFor?.(chatId, cfg.id)
+      if (menuCtx !== undefined) {
+        menuCtx.userId = message.from?.id ?? 0
+        menuCtx.canOperate = this.isAllowed(menuCtx.userId)
+        await delivery.sendMenu(chatId, mainMenuText(menuCtx), mainMenuKeyboard())
+      } else {
+        await delivery.sendMenu(chatId, mainMenuText(), mainMenuKeyboard())
+      }
       return
     }
 
@@ -229,6 +236,11 @@ export class BotManager {
       await delivery.sendFinal(chatId, '菜单不可用')
       return
     }
+    // Authorize the callback sender for ops; reuse the same whitelist check as
+    // inbound messages so the high-risk actions (restart dsh) cannot be pressed
+    // by a non-whitelisted user.
+    menuCtx.userId = callbackQuery.from?.id ?? 0
+    menuCtx.canOperate = this.isAllowed(menuCtx.userId)
     try {
       const result = await handleMenuCallback(data, menuCtx)
       await delivery.sendMenu(chatId, result.text, result.keyboard)

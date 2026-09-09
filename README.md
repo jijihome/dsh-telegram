@@ -14,6 +14,7 @@ Telegram 桥接插件,让 DeepSeek Harness (dsh) 的 agent 通过 Telegram 使�
   - 最终消息、运行/完成状态、取消、错误
 - **会话中断捕获**:不再把 `turn/end` 一律当「完成」——按 `reason` 区分并通知 bot:`⛔ 已取消(用户/父级/钩子/释放)`、`❌ 错误(带 message/code)`、`🔒 已阻塞`、`⏳ 输出 token 超限`、`⚠️ 会话中断(崩溃/遗留)`;`agent/error`(无回合内位置)也会转发;同一回合 `agent/error` + `turn/end(error)` 去重只通知一次
 - **每 chat 独立 agent 会话**:session id = `telegram:<botId>:<chatId>`,`/new` 轮换新会话
+- **运维菜单**(`/menu` → ⚙️ 运维):**🔄 重启 DSH**、💻 系统信息。重启通过脱离宿主的代理进程 kill 宿主 DSH 再用原命令重建(宿主进程不在 pm2 下也能恢复);**仅白名单用户可用**(`allowedUserIds` / `allowAllUsers`)
 - **命令系统**:`/start` `/help` `/new` `/clear` `/stop` `/workspace` `/session`
 - **持久化**:chat↔session 绑定、工作目录、长轮询 offset 存 `<cwd>/data/state.json`,重启后自动恢复(会话经 `ctx.agents.resume` 续接,offset 不重复拉取)
 - **白名单**:默认拒绝所有用户,`allowedUserIds` 放行,`allowAllUsers: true` 放行一切(仅开发)
@@ -81,6 +82,13 @@ dsh --profile <name> --dump-config | grep telegram
 | `/stop` | 取消当前运行回合 |
 | `/workspace` | 查看/切换工作目录 |
 | `/session` | 查看会话绑定与状态 |
+| `/menu` | 打开内联键盘菜单(含运维子菜单) |
+
+菜单 / 运维:
+| 项 | 说明 |
+| --- | --- |
+| 🔄 重启 DSH | 重启宿主 dsh 进程。spawn 一个 detached 重启代理,等 3 秒(让确认消息送达)后 kill 宿主 PID 并以原启动命令重建。**仅白名单用户可用** |
+| 💻 系统信息 | 显示宿主进程 PID / Node 版本 / 启动命令 / 工作目录 |
 
 ## 架构
 
@@ -100,6 +108,8 @@ src/
 │   ├── event-normalizer.ts # DSH 事件 → 统一消息流(文本/推理/工具/状态)
 │   ├── renderer.ts         # 消息流 → Telegram 显示文本
 │   ├── state-store.ts      # chat↔session/offset 持久化(JSON)
+│   ├── host.ts            # 宿主进程信息 + 重启调度(spawn detached agent)
+│   ├── host-agent.ts      # 脱离宿主的重启代理:kill 宿主→重建(纯入口,不被 import)
 │   ├── session-manager.ts  # per-chat 会话获取/轮换/取消/resume
 │   └── format.ts           # escapeHtml / markdown→HTML / 4096 分片
 └── commands/

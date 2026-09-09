@@ -25,6 +25,7 @@ import { SessionManager } from './core/session-manager.js'
 import { StateStore } from './core/state-store.js'
 import { BotManager, normalizeBots } from './telegram/bot-manager.js'
 import { Delivery } from './telegram/delivery.js'
+import { getHostInfo, scheduleRestart } from './core/host.js'
 import { join } from 'node:path'
 
 export { Config }
@@ -35,6 +36,7 @@ export { DshAgentFactory } from './harness/agent-factory.js'
 export type { AgentFactoryLike } from './harness/agent-factory.js'
 export { SessionManager } from './core/session-manager.js'
 export { StateStore } from './core/state-store.js'
+export { getHostInfo, scheduleRestart } from './core/host.js'
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js'
 export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js'
 export { markdownToHtml, splitMessage, escapeHtml } from './core/format.js'
@@ -142,6 +144,19 @@ export function apply(ctx: Context, config: TelegramConfig) {
       defaultCwd,
       provider,
       model,
+      // Filled per-callback by the bot manager (authorization).
+      userId: 0,
+      canOperate: false,
+      getHostInfo,
+      restartDsh: () => {
+        try {
+          scheduleRestart({ delayMs: 3000 })
+          return '🔄 已请求重启 DSH,约 3 秒后自动重启(宿主进程将被重建)。'
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return `❌ 重启请求失败: ${msg}`
+        }
+      },
       getCurrentModel: readCurrentModel,
       listModels: async () => {
         const llm = (ctx.get as (k: string) => unknown)?.('llm') as

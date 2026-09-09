@@ -20,6 +20,10 @@ export interface MenuCtx {
     defaultCwd: string;
     provider: string;
     model: string;
+    /** The Telegram user id pressing the button (for ops authorization). */
+    userId: number;
+    /** Whether the current user is allowed to run ops (restart dsh). */
+    canOperate: boolean;
     getCurrentModel(): {
         provider: string;
         model: string;
@@ -40,14 +44,18 @@ export interface MenuCtx {
         cwd?: string;
         title?: string;
     }>>;
+    /** Return a host-process snapshot for the ops info panel. */
+    getHostInfo(): string;
+    /** Schedule a host dsh restart; returns a user-facing confirmation text. */
+    restartDsh(): string;
 }
 /** Result of handling one menu callback: text + optional follow-up keyboard. */
 export interface MenuResult {
     text: string;
     keyboard?: TelegramInlineKeyboard;
 }
-/** Main menu keyboard. */
-export declare function mainMenuText(): string;
+/** Main menu text: status summary (when ctx is given), no menu-title banner. */
+export declare function mainMenuText(ctx?: MenuCtx): string;
 /** Main menu keyboard (rows). */
 export declare function mainMenuKeyboard(): TelegramInlineKeyboard;
 /** Handle one callback `data`. Returns the text + keyboard to send/show. */

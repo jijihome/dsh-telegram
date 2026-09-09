@@ -26,6 +26,7 @@ export { DshAgentFactory } from './harness/agent-factory.js';
 export type { AgentFactoryLike } from './harness/agent-factory.js';
 export { SessionManager } from './core/session-manager.js';
 export { StateStore } from './core/state-store.js';
+export { getHostInfo, scheduleRestart } from './core/host.js';
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js';
 export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js';
 export { markdownToHtml, splitMessage, escapeHtml } from './core/format.js';

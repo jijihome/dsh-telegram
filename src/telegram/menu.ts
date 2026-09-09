@@ -8,7 +8,7 @@
 
 import type { Delivery } from './delivery.js'
 import type { SessionManager } from '../core/session-manager.js'
-import type { StateStore } from '../core/state-store.js'
+import type { StateStore, ChatState } from '../core/state-store.js'
 import type { TelegramInlineKeyboard } from './api.js'
 
 /** Capabilities a menu action needs (injected from the plugin entry point). */
@@ -22,6 +22,10 @@ export interface MenuCtx {
   defaultCwd: string
   provider: string
   model: string
+  /** The Telegram user id pressing the button (for ops authorization). */
+  userId: number
+  /** Whether the current user is allowed to run ops (restart dsh). */
+  canOperate: boolean
   getCurrentModel(): { provider: string; model: string }
   listModels(): Promise<Array<{ provider: string; model: string }>>
   setModel(provider: string, model: string): Promise<void>
@@ -29,6 +33,10 @@ export interface MenuCtx {
   setPreset(id: string): Promise<void>
   listWorkspaces(): Promise<string[]>
   listSessions(): Promise<Array<{ id: string; cwd?: string; title?: string }>>
+  /** Return a host-process snapshot for the ops info panel. */
+  getHostInfo(): string
+  /** Schedule a host dsh restart; returns a user-facing confirmation text. */
+  restartDsh(): string
 }
 
 /** Result of handling one menu callback: text + optional follow-up keyboard. */
@@ -46,9 +54,15 @@ function keyboard(rows: Array<Array<[string, string]>>): TelegramInlineKeyboard 
 
 const BACK = 'menu:back'
 
-/** Main menu keyboard. */
-export function mainMenuText(): string {
-  return '🛠 dsh-telegram 菜单\n选择功能:'
+/** Ops callback data (namespaced under `menu:ops:*`). */
+const OPS = 'menu:ops'
+const OPS_RESTART = 'menu:ops:restart'
+const OPS_INFO = 'menu:ops:info'
+
+/** Main menu text: status summary (when ctx is given), no menu-title banner. */
+export function mainMenuText(ctx?: MenuCtx): string {
+  if (ctx === undefined) return '选择功能:'
+  return statusText(ctx)
 }
 
 /** Main menu keyboard (rows). */
@@ -57,13 +71,22 @@ export function mainMenuKeyboard(): TelegramInlineKeyboard {
     [['🆕 新建会话', 'menu:new'], ['🗑 清除会话', 'menu:clear']],
     [['📂 工作目录', 'menu:workspace'], ['🔗 绑定会话', 'menu:bind']],
     [['🤖 切换模型', 'menu:model'], ['🧭 工作方式', 'menu:preset']],
-    [['📊 查询状态', 'menu:session'], ['🗒 会话记录', 'menu:history']],
+    [['🗒 会话记录', 'menu:history']],
+    [['⚙️ 运维', OPS]],
   ])
 }
 
 /** Build a submenu frame with a Back row appended. */
 function withBack(rows: Array<Array<[string, string]>>): TelegramInlineKeyboard {
   return keyboard([...rows, [['🔙 返回上级', BACK]]])
+}
+
+/** Ops submenu keyboard (system info + restart dsh) with a Back row. */
+function opsMenuKeyboard(): TelegramInlineKeyboard {
+  return withBack([
+    [['🔄 重启 DSH', OPS_RESTART]],
+    [['💻 系统信息', OPS_INFO]],
+  ])
 }
 
 /** Handle one callback `data`. Returns the text + keyboard to send/show. */
@@ -73,8 +96,6 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
       return doNew(ctx)
     case 'menu:clear':
       return doClear(ctx)
-    case 'menu:session':
-      return doStatus(ctx)
     case 'menu:workspace':
       return doWorkspace(ctx)
     case 'menu:model':
@@ -85,8 +106,14 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
       return doBind(ctx)
     case 'menu:history':
       return doHistory(ctx)
+    case OPS:
+      return doOps(ctx)
+    case OPS_RESTART:
+      return doRestartDsh(ctx)
+    case OPS_INFO:
+      return doOpsInfo(ctx)
     case BACK:
-      return { text: mainMenuText(), keyboard: mainMenuKeyboard() }
+      return { text: mainMenuText(ctx), keyboard: mainMenuKeyboard() }
     default:
       // Namespaced sub-actions: workspace:<path>, model:<provider>:<model>, preset:<id>
       // Namespaced sub-actions: workspace:<path>, model:<provider>:<model>, preset:<id>, session:<id>
@@ -116,25 +143,31 @@ async function doClear(ctx: MenuCtx): Promise<MenuResult> {
   }
 }
 
-/** Query status: session / cwd / model / binding. */
-function doStatus(ctx: MenuCtx): MenuResult {
+/** Status summary text: session / cwd / model / binding (shown at menu top). */
+function statusText(ctx: MenuCtx): string {
   const own = ctx.sessions.get(ctx.chatId, ctx.botId)
   const bound = ctx.sessions.getBound(ctx.chatId, ctx.botId)
   const model = ctx.getCurrentModel()
+  // Selected work mode (preset) is persisted on the chat state by setPreset.
+  const persisted = ctx.store.getChat(`${ctx.botId}:${ctx.chatId}`) as
+    (ChatState & { agentPreset?: string }) | undefined
+  const cwd = own?.cwd ?? bound?.cwd ?? persisted?.cwd ?? ctx.defaultCwd
+  const workMode = persisted?.agentPreset ?? '默认'
   const lines = [
-    '📊 会话状态:',
+    '📊 当前状态:',
   ]
   if (bound !== undefined) {
     lines.push(`• 🔗 绑定会话: ${bound.sessionId}`)
     lines.push(`• 绑定方式: ${bound.botId === '' ? '任意 bot' : `bot ${bound.botId}`}`)
   } else if (own !== undefined) {
     lines.push(`• session: ${own.sessionId}`)
-    lines.push(`• cwd: ${own.cwd}`)
   } else {
     lines.push('• 尚未创建会话(发消息即建)')
   }
+  lines.push(`• 工作目录: ${cwd}`)
+  lines.push(`• 工作方式: ${workMode}`)
   lines.push(`• 模型: ${model.provider}/${model.model}`)
-  return { text: lines.join('\n'), keyboard: mainMenuKeyboard() }
+  return lines.join('\n')
 }
 
 /** Workspace submenu: list all known working directories. */
@@ -273,4 +306,28 @@ function doSessionPick(data: string, ctx: MenuCtx): MenuResult {
     text: `🗒 选中会话: ${id}\n直接下发节消息即可进入该会话;绑定切换用「绑定会话」。`,
     keyboard: mainMenuKeyboard(),
   }
+}
+
+/** Ops submenu: system info + restart dsh. Authorized users only. */
+function doOps(ctx: MenuCtx): MenuResult {
+  if (!ctx.canOperate) {
+    return { text: '⛔ 无权限使用运维功能(需在 allowedUserIds 白名单内)', keyboard: mainMenuKeyboard() }
+  }
+  return { text: '⚙️ 运维中心\n选择操作:', keyboard: opsMenuKeyboard() }
+}
+
+/** Show a host-process snapshot. */
+function doOpsInfo(ctx: MenuCtx): MenuResult {
+  if (!ctx.canOperate) {
+    return { text: '⛔ 无权限使用运维功能(需在 allowedUserIds 白名单内)', keyboard: mainMenuKeyboard() }
+  }
+  return { text: `💻 宿主进程信息:\n${ctx.getHostInfo()}`, keyboard: opsMenuKeyboard() }
+}
+
+/** Schedule a host dsh restart (detached agent takes the host down & relaunches). */
+function doRestartDsh(ctx: MenuCtx): MenuResult {
+  if (!ctx.canOperate) {
+    return { text: '⛔ 无权限使用运维功能(需在 allowedUserIds 白名单内)', keyboard: mainMenuKeyboard() }
+  }
+  return { text: ctx.restartDsh(), keyboard: mainMenuKeyboard() }
 }
