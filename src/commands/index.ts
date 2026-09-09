@@ -157,6 +157,21 @@ async function commandWorkspace(text: string, ctx: CommandContext): Promise<Comm
 }
 
 function commandSession(ctx: CommandContext): CommandResult {
+  // A config-bound chat shows its bound session first, then the own-session.
+  const bound = ctx.sessions.getBound(ctx.chatId, ctx.botId)
+  if (bound !== undefined) {
+    const live = ctx.sessions.get(ctx.chatId, ctx.botId)
+    return {
+      handled: true,
+      reply: [
+        '🔗 已绑定现有会话:',
+        `• 绑定 session: ${bound.sessionId}`,
+        `• 绑定方式: ${bound.botId === '' ? '任意 bot(chatId)' : `bot ${bound.botId}`}`,
+        `• cwd: ${bound.cwd}`,
+        `• 独立会话: ${live !== undefined ? `有(${live.sessionId})` : '无(消息直入绑定会话)'}`,
+      ].join('\n'),
+    }
+  }
   const binding = ctx.sessions.get(ctx.chatId, ctx.botId)
   if (binding === undefined) {
     return { handled: true, reply: 'ℹ️ 尚无会话;发送消息会自动创建。' }

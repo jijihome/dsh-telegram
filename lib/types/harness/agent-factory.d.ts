@@ -10,7 +10,7 @@
  * @module harness/agent-factory
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { AgentHandle } from '@deepseek-ai/dsh-agent';
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent';
 import type { SessionId } from '@deepseek-ai/dsh-session';
 export interface AgentCreateRequest {
     /** Stable session id for this chat. */
@@ -31,6 +31,8 @@ export interface AgentFactoryLike {
         provider: string;
         model: string;
     }): Promise<AgentHandle>;
+    /** Live agent for a session id in the current process, or undefined. */
+    getLive(sessionId: string): Agent | undefined;
 }
 /**
  * Real implementation backed by the injected `agents` registry.
@@ -46,6 +48,8 @@ export declare class DshAgentFactory implements AgentFactoryLike {
         provider: string;
         model: string;
     }): Promise<AgentHandle>;
+    /** Live agent lookup: the registry keeps one agent per session id. */
+    getLive(sessionId: string): Agent | undefined;
     /** Prefer the live `agentDefaultModel` selection, fall back to request values. */
     private readSelection;
 }

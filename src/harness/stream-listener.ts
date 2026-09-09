@@ -70,8 +70,30 @@ export class StreamListener {
   }
 
   private handle(session: Session, event: SessionEvent): void {
+    // Route by our own per-chat binding first, then by config session binding
+    // (a bot chat bound to an existing DSH session, e.g. a web conversation).
     const binding = this.sessions.bySessionId(String(session.id))
-    if (binding === undefined) {
+    let chatId: number | undefined
+    let botId: string | undefined
+    if (binding !== undefined) {
+      chatId = binding.chatId
+      botId = binding.botId
+    } else {
+      const bound = this.sessions.byBoundSessionId(String(session.id))
+      if (bound !== undefined) {
+        chatId = bound.chatId
+        // A bare-chatId binding (botId '') applies to any bot: resolve it to
+        // the single configured bot, or to nothing when there are several.
+        botId = bound.botId !== ''
+          ? bound.botId
+          : (this.deliveries.size === 1 ? this.deliveries.keys().next().value : undefined)
+        if (botId === undefined) {
+          this.logger?.warn(`[tg] bound session ${String(session.id)} has no unique bot; skipping (multi-bot)`)
+          return
+        }
+      }
+    }
+    if (chatId === undefined || botId === undefined) {
       // Diagnostic: session events we are not bound to (noise), logged once
       // per distinct session id to avoid flooding.
       this.logger?.warn(`[tg] unbound session event ${event.type} for ${String(session.id)}`)
@@ -87,9 +109,8 @@ export class StreamListener {
         type === 'turn/error') {
       this.logger?.warn(`[tg] event ${type} for ${String(session.id)}`)
     }
-    const delivery = this.deliveries.get(binding.botId)
+    const delivery = this.deliveries.get(botId)
     if (delivery === undefined) return
-    const chatId = binding.chatId
 
     // 1. Chunk events drive the live streaming segment.
     if (event.type === 'assistant/chunk') {
@@ -137,7 +158,10 @@ export class StreamListener {
         await delivery.sendFinal(chatId, `🔐 ${message.summary}`)
         break
       case 'user-message':
-        // Echo of our own forwarded text; keep it out of the stream.
+        // A user message in the bound session (e.g. typed in the web GUI) is
+        // forwarded so the bot shows the full conversation. Our own echo is
+        // kept out of the live stream but still visible as a fixed message.
+        await delivery.sendFinal(chatId, `👤 ${message.text}`)
         break
     }
   }

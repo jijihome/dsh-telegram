@@ -11,7 +11,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
@@ -30,6 +30,8 @@ export interface AgentFactoryLike {
   create(request: AgentCreateRequest): Promise<AgentHandle>
   /** Resume an agent on a persisted session (restart recovery). */
   resume(request: { sessionId: SessionId; cwd: string; provider: string; model: string }): Promise<AgentHandle>
+  /** Live agent for a session id in the current process, or undefined. */
+  getLive(sessionId: string): Agent | undefined
 }
 
 /** Selection snapshot taken from `agentDefaultModel` when present. */
@@ -72,6 +74,12 @@ export class DshAgentFactory implements AgentFactoryLike {
         installModelSelection(agentCtx, { current: selection, assembled: undefined })
       },
     })
+  }
+
+  /** Live agent lookup: the registry keeps one agent per session id. */
+  getLive(sessionId: string): Agent | undefined {
+    const registry = this.ctx.agents as unknown as { get(id: string): Agent | undefined }
+    return registry.get(sessionId)
   }
 
   /** Prefer the live `agentDefaultModel` selection, fall back to request values. */

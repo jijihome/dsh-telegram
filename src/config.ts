@@ -37,6 +37,13 @@ export interface TelegramConfig {
   dataDir?: string
   /** Keep the host process alive for long-polling daemon operation. */
   keepAlive?: boolean
+  /**
+   * Session binding: map a Telegram chat to an existing DSH session so the
+   * bot participates in that conversation bidirectionally. Keys are either
+   * `botId:chatId` (exact) or a bare `chatId` (any bot); values are DSH
+   * session ids (e.g. `session-<uuid>` for a web GUI conversation).
+   */
+  bindings?: Record<string, string>
 }
 
 export const Config: Schema<TelegramConfig> = Schema.object({
@@ -54,4 +61,5 @@ export const Config: Schema<TelegramConfig> = Schema.object({
   workspaceRoots: Schema.array(Schema.string()),
   dataDir: Schema.string(),
   keepAlive: Schema.boolean().default(true),
+  bindings: Schema.dict(Schema.string()),
 })

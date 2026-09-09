@@ -9,7 +9,7 @@
  * @module core/session-manager
  */
 
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AgentFactoryLike } from '../harness/agent-factory.js'
@@ -28,6 +28,18 @@ export interface SessionBinding {
   cwd: string
   /** Monotonic rotation counter for session ids. */
   generation: number
+}
+
+/** A bound chat: the bot participates in an existing DSH session. */
+export interface BoundChat {
+  /** Telegram chat id (numeric). */
+  chatId: number
+  /** Bot id owning this chat, or '' when the binding applies to any bot. */
+  botId: string
+  /** The existing DSH session the chat is bound to. */
+  sessionId: string
+  /** Working directory hint used when resuming an offline session. */
+  cwd: string
 }
 
 export interface SessionManagerOptions {
@@ -55,6 +67,8 @@ export class SessionManager {
   private readonly defaultCwd: string
   private readonly logger: SessionManagerOptions['logger'] | undefined
   private readonly bindings = new Map<string, SessionBinding>()
+  /** Bound chats keyed by config key (`botId:chatId` or bare `chatId`). */
+  private readonly bound = new Map<string, BoundChat>()
 
   constructor(options: SessionManagerOptions) {
     this.factory = options.factory
@@ -76,6 +90,62 @@ export class SessionManager {
       if (binding.sessionId === sessionId) return binding
     }
     return undefined
+  }
+
+  /**
+   * Register a bound chat (config `bindings`). `botId` may be '' to apply the
+   * binding to any bot. Re-registering a chat overwrites its binding.
+   */
+  bind(chatId: number, botId: string, sessionId: string, cwd: string): void {
+    const key = botId === '' ? String(chatId) : sessionKey(botId, chatId)
+    this.bound.set(key, { chatId, botId, sessionId, cwd })
+    this.logger?.warn(`[tg] bound chat ${key} -> ${sessionId}`)
+  }
+
+  /** Bound chat for a chat/bot (exact key first, then bare-chat fallback). */
+  getBound(chatId: number, botId: string): BoundChat | undefined {
+    return this.bound.get(sessionKey(botId, chatId))
+      ?? this.bound.get(String(chatId))
+  }
+
+  /** Bound chat whose target DSH session matches (reverse index for routing). */
+  byBoundSessionId(sessionId: string): BoundChat | undefined {
+    for (const entry of this.bound.values()) {
+      if (entry.sessionId === sessionId) return entry
+    }
+    return undefined
+  }
+
+  /**
+   * Send user text into the bound chat's existing DSH session. Prefers the
+   * live agent in this process (web GUI conversation); falls back to resuming
+   * the session when its agent is not currently running.
+   */
+  async boundFollowup(chatId: number, botId: string, text: string, onError?: (error: unknown) => void): Promise<void> {
+    const bound = this.getBound(chatId, botId)
+    if (bound === undefined) return
+    try {
+      let agent = this.factory.getLive(bound.sessionId)
+      if (agent === undefined) {
+        this.logger?.warn(`[tg] bound session ${bound.sessionId} not live; resuming`)
+        const handle = await this.factory.resume({
+          sessionId: bound.sessionId as SessionId,
+          cwd: bound.cwd,
+          provider: this.provider,
+          model: this.model,
+        })
+        agent = handle.agent
+      }
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'user' },
+      }))
+      const status = (agent as { status?: string }).status
+      this.logger?.warn(`[tg] bound followup -> ${bound.sessionId}: ${text.slice(0, 60)} (agent=${status})`)
+    } catch (error) {
+      this.logger?.error(`[tg] bound followup failed for ${bound.sessionId}: ${messageOf(error)}`)
+      onError?.(error)
+    }
   }
 
   /**
