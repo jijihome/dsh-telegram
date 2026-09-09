@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# local reference repos (third-party, ~88MB)
+ref/
+
+# local probe scaffolding (contains a real bot token in telegram-test-overlay.yml)
+probe/
+
+# internal task handoff document (local paths, machine details)
+TASK.md
+
+# runtime data
+data/
+
+# build artifacts / OS junk
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

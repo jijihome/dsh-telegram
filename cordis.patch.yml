@@ -1,0 +1,6 @@
+# dsh-telegram bundle patch: mounts the telegram rows into the profile composition.
+# Row names resolve through the profile node_modules (the bundle is installed by
+# `dsh plugin --profile <name> add <dir>`).
+- insert:
+    - id: telegram
+      name: 'dsh-telegram'

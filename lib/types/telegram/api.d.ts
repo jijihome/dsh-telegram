@@ -1,0 +1,118 @@
+/**
+ * Minimal Telegram Bot API client over `fetch`: long-polling `getUpdates`,
+ * `sendMessage` with HTML or plain parse modes, `editMessageText`,
+ * `sendChatAction`, and `getMe`.
+ *
+ * Based on @loserfox/telegram's client.ts (BSD-3-Clause), extended with
+ * `editMessageText` for incremental streaming updates.
+ * The token is embedded in the request URL, so every error path redacts it.
+ *
+ * @module telegram/api
+ */
+/** Telegram user object (sender of a message). */
+export interface TelegramUser {
+    readonly id: number;
+    readonly first_name?: string;
+    readonly username?: string;
+    readonly is_bot?: boolean;
+}
+/** Telegram chat object (private chat, group, or channel). */
+export interface TelegramChat {
+    readonly id: number;
+    readonly type: string;
+    readonly title?: string;
+    readonly username?: string;
+    readonly first_name?: string;
+}
+/** Telegram message object; only the text-relevant fields are modeled. */
+export interface TelegramMessage {
+    readonly message_id: number;
+    readonly chat: TelegramChat;
+    readonly from?: TelegramUser;
+    readonly text?: string;
+    readonly date: number;
+}
+/** Telegram update envelope; only message updates are modeled. */
+export interface TelegramUpdate {
+    readonly update_id: number;
+    readonly message?: TelegramMessage;
+}
+/** Runtime seam surface tests substitute with a fake. */
+export interface TelegramClientLike {
+    /** Fetch the bot identity; validates the token. */
+    getMe(): Promise<TelegramUser>;
+    /** Long-poll for updates at or after `offset`. */
+    getUpdates(offset?: number): Promise<TelegramUpdate[]>;
+    /** Send a message, optionally with HTML parse mode. */
+    sendMessage(chatId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /** Replace the text of a previously sent message (incremental streaming). */
+    editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /** Send a chat action such as `typing`. */
+    sendChatAction(chatId: number, action: string): Promise<boolean>;
+}
+/** Options for {@link TelegramClient}. */
+export interface TelegramClientOptions {
+    /** HTTP client seam; production uses the global `fetch`. */
+    fetch?: typeof fetch;
+    /** API base URL; production uses the public Bot API. */
+    baseUrl?: string;
+    /** Long-polling timeout in seconds; production default is 30. */
+    pollingTimeoutSec?: number;
+}
+/**
+ * Minimal Bot API client. All methods throw on transport failure or a
+ * non-`ok` response; thrown messages never contain the token.
+ */
+export declare class TelegramClient implements TelegramClientLike {
+    private readonly token;
+    private readonly fetchImpl;
+    private readonly baseUrl;
+    /** Long-polling timeout in seconds; controls each getUpdates call. */
+    readonly pollingTimeoutSec: number;
+    /**
+     * @param token - bot token from @BotFather.
+     * @param options - client options.
+     */
+    constructor(token: string, options?: TelegramClientOptions);
+    private url;
+    /** POST `method` with `body`; throws on transport failure or a non-ok response. */
+    private call;
+    /**
+     * Fetch the bot identity; fails when the token is invalid.
+     * @returns the bot user object.
+     */
+    getMe(): Promise<TelegramUser>;
+    /**
+     * Long-poll for message updates. Pass the previous update id plus one to
+     * acknowledge already-seen updates; `undefined` starts from the newest.
+     * @param offset - the update id to start from.
+     * @returns the batch of updates received within the polling timeout.
+     */
+    getUpdates(offset?: number): Promise<TelegramUpdate[]>;
+    /**
+     * Send a text message, optionally with HTML parse mode.
+     * @param chatId - target chat id.
+     * @param text - the message text.
+     * @param parseMode - `HTML` when the text is Telegram-HTML, else plain text.
+     * @returns the delivered message object.
+     */
+    sendMessage(chatId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /**
+     * Replace the text of a previously sent message. Used to stream incremental
+     * model output into one growing message instead of spamming new ones.
+     * @param chatId - target chat id.
+     * @param messageId - the message to edit (from a prior sendMessage).
+     * @param text - the new full text (Telegram HTML or plain).
+     * @param parseMode - `HTML` when `text` is Telegram-HTML, else plain text.
+     * @returns the edited message object.
+     */
+    editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /**
+     * Send a chat action such as `typing`; Telegram shows it briefly while a
+     * real message is on the way.
+     * @param chatId - target chat id.
+     * @param action - the action name (for example `typing`).
+     * @returns whether the action was accepted.
+     */
+    sendChatAction(chatId: number, action: string): Promise<boolean>;
+}
