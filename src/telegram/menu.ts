@@ -36,7 +36,13 @@ export interface MenuCtx {
   /** Current work-mode preset id (per-chat selection, else the default). */
   getCurrentPresetId(): Promise<string>
   listWorkspaces(): Promise<string[]>
-  listSessions(): Promise<Array<{ id: string; cwd?: string; title?: string }>>
+  listSessions(): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>>
+  /** Switch this chat to an existing DSH session (bind + persist). */
+  switchSession(sessionId: string, cwd?: string): Promise<void>
+  /** This chat's currently selected working directory (persisted cwd or default). */
+  currentCwd(): string
+  /** Persist this chat's working directory (merge + flush). */
+  setCurrentCwd(cwd: string): void
   /** Return a host-process snapshot for the ops info panel. */
   getHostInfo(): string
   /** Schedule a host dsh restart; returns a user-facing confirmation text. */
@@ -73,9 +79,8 @@ export async function mainMenuText(ctx?: MenuCtx): Promise<string> {
 export function mainMenuKeyboard(): TelegramInlineKeyboard {
   return keyboard([
     [['🆕 新建会话', 'menu:new'], ['🗑 清除会话', 'menu:clear']],
-    [['📂 工作目录', 'menu:workspace'], ['🔗 绑定会话', 'menu:bind']],
+    [['📂 工作目录', 'menu:workspace'], ['💬 会话', 'menu:sessions']],
     [['🤖 切换模型', 'menu:model'], ['🧭 工作方式', 'menu:preset']],
-    [['🗒 会话记录', 'menu:history']],
     [['⚙️ 运维', OPS]],
   ])
 }
@@ -106,10 +111,8 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
       return doModel(ctx)
     case 'menu:preset':
       return doPreset(ctx)
-    case 'menu:bind':
-      return doBind(ctx)
-    case 'menu:history':
-      return doHistory(ctx)
+    case 'menu:sessions':
+      return doMenuSessions(ctx)
     case OPS:
       return doOps(ctx)
     case OPS_RESTART:
@@ -152,7 +155,9 @@ async function statusText(ctx: MenuCtx): Promise<string> {
   const own = ctx.sessions.get(ctx.chatId, ctx.botId)
   const bound = ctx.sessions.getBound(ctx.chatId, ctx.botId)
   const model = ctx.getCurrentModel()
-  const cwd = own?.cwd ?? bound?.cwd ?? ctx.defaultCwd
+  // Show the chat's persisted cwd (user's last workspace pick) so it matches
+  // the workspace menu; the live session/bound cwd is a fallback only.
+  const cwd = ctx.currentCwd()
   // Resolve the effective work-mode display name (selected preset or the
   // deployment default), so it matches the names listed in the switch menu.
   let workMode = '默认'
@@ -182,35 +187,57 @@ async function doWorkspace(ctx: MenuCtx): Promise<MenuResult> {
   } catch {
     roots = ctx.workspaceRoots
   }
-  if (roots.length === 0) roots = [ctx.defaultCwd]
+  if (roots.length === 0) roots = [ctx.currentCwd()]
+  const current = ctx.currentCwd()
   const rows: Array<Array<[string, string]>> = []
   for (const root of roots.slice(0, 15)) {
-    const label = root === ctx.defaultCwd ? `${root} (当前)` : root
-    rows.push([[`🗂 ${label}`, `workspace:${label}`]])
+    const label = root === current ? `${root} (当前)` : root
+    rows.push([[`🗂 ${label}`, `workspace:${root}`]])
   }
   return {
-    text: `📂 选择工作目录(当前 ${ctx.defaultCwd}):`,
+    text: `📂 选择工作目录(当前 ${current}):`,
     keyboard: withBack(rows),
   }
 }
 
-/** Session history submenu: list sessions (optionally switch by picking). */
-async function doHistory(ctx: MenuCtx): Promise<MenuResult> {
-  let list: Array<{ id: string; cwd?: string; title?: string }>
+/** Format a Unix-epoch-ms timestamp as a compact local "MM-DD HH:mm". */
+function formatTime(ms: number): string {
+  if (!(ms > 0)) return '--'
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * Sessions submenu: list the chat's sessions, scoped to its current working
+ * directory, as "time + title" rows; picking one switches this chat to it.
+ */
+async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
+  let list: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>
   try {
     list = await ctx.listSessions()
   } catch {
     list = []
   }
   if (list.length === 0) {
-    return { text: '🗒 暂无会话记录', keyboard: mainMenuKeyboard() }
+    return { text: '💬 暂无会话记录', keyboard: mainMenuKeyboard() }
   }
-  const rows: Array<Array<[string, string]>> = list.slice(0, 15).map(s => {
-    const label = s.title || s.id.slice(0, 12)
-    return [[`💬 ${label}`, `session:${s.id}`]]
+  const currentCwd = ctx.currentCwd()
+  // Scope to the chat's current working directory, newest first.
+  const scoped = list
+    .filter(s => s.cwd === currentCwd)
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  const shown = scoped.length > 0 ? scoped.slice(0, 15) : list.slice(0, 15)
+  if (shown.length === 0) {
+    return { text: `💬 当前工作目录下暂无会话\n(工作目录 ${currentCwd})`, keyboard: mainMenuKeyboard() }
+  }
+  const rows: Array<Array<[string, string]>> = shown.map(s => {
+    const title = s.displayTitle ?? s.title ?? s.id.slice(0, 12)
+    return [[`${formatTime(s.updatedAt ?? 0)} · ${title}`, `session:${s.id}`]]
   })
+  const scopeNote = scoped.length > 0 ? `当前目录(${currentCwd})` : '全部会话'
   return {
-    text: `🗒 会话记录(${list.length} 个;点选以该会话继续):`,
+    text: `💬 会话(${scopeNote})\n点选以切换该会话;时间为更新时间:`,
     keyboard: withBack(rows),
   }
 }
@@ -261,22 +288,14 @@ async function doPreset(ctx: MenuCtx): Promise<MenuResult> {
   }
 }
 
-/** Bind session submenu (placeholder for now; a fuller picker comes later). */
-function doBind(ctx: MenuCtx): MenuResult {
-  const bound = ctx.sessions.getBound(ctx.chatId, ctx.botId)
-  const text = bound !== undefined
-    ? `🔗 当前绑定: ${bound.sessionId}`
-    : '🔗 未绑定会话(由配置 bindings 决定;更完整的绑定选择器后续加入)'
-  return { text, keyboard: mainMenuKeyboard() }
-}
-
 /** Apply a picked workspace root. */
 function doWorkspacePick(data: string, ctx: MenuCtx): MenuResult {
   const target = data.slice('workspace:'.length)
-  // Record the picked cwd for the next /new; the live session keeps its own cwd.
-  ctx.store.setChat(`${ctx.botId}:${ctx.chatId}`, { cwd: target } as never)
+  // Persist the picked cwd for this chat (merge existing fields + flush), so it
+  // survives a DSH restart and is used as the cwd for the next fresh session.
+  ctx.setCurrentCwd(target)
   return {
-    text: `📁 已记录工作目录:${target}\n使用"新建会话"以新目录开启。`,
+    text: `📁 已切换到工作目录:${target}\n新建会话(清除会话)将以该目录开启。`,
     keyboard: mainMenuKeyboard(),
   }
 }
@@ -308,12 +327,24 @@ async function doPresetPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
   }
 }
 
-/** A picked session from the history list: show how to engage it. */
-function doSessionPick(data: string, ctx: MenuCtx): MenuResult {
+/** A picked session: switch this chat to it (bind + persist). */
+async function doSessionPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
   const id = data.slice('session:'.length)
-  return {
-    text: `🗒 选中会话: ${id}\n直接下发节消息即可进入该会话;绑定切换用「绑定会话」。`,
-    keyboard: mainMenuKeyboard(),
+  // Look up the session's cwd (for the binding) from the roster, else default.
+  let cwd: string | undefined
+  try {
+    const list = await ctx.listSessions()
+    cwd = list.find(s => s.id === id)?.cwd
+  } catch { cwd = undefined }
+  try {
+    await ctx.switchSession(id, cwd)
+    return {
+      text: `✅ 已切换到会话: ${id}\n后续消息将进入该会话;工作目录: ${cwd ?? ctx.currentCwd()}`,
+      keyboard: mainMenuKeyboard(),
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    return { text: `❌ 切换会话失败: ${msg}`, keyboard: mainMenuKeyboard() }
   }
 }
 

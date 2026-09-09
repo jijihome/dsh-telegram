@@ -47,7 +47,15 @@ export interface MenuCtx {
         id: string;
         cwd?: string;
         title?: string;
+        displayTitle?: string;
+        updatedAt?: number;
     }>>;
+    /** Switch this chat to an existing DSH session (bind + persist). */
+    switchSession(sessionId: string, cwd?: string): Promise<void>;
+    /** This chat's currently selected working directory (persisted cwd or default). */
+    currentCwd(): string;
+    /** Persist this chat's working directory (merge + flush). */
+    setCurrentCwd(cwd: string): void;
     /** Return a host-process snapshot for the ops info panel. */
     getHostInfo(): string;
     /** Schedule a host dsh restart; returns a user-facing confirmation text. */

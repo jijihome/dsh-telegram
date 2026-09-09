@@ -27,6 +27,7 @@ import { BotManager, normalizeBots } from './telegram/bot-manager.js'
 import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart } from './core/host.js'
 import { join } from 'node:path'
+import { readFileSync, readdirSync } from 'node:fs'
 
 export { Config }
 export type { TelegramConfig }
@@ -59,7 +60,12 @@ export function apply(ctx: Context, config: TelegramConfig) {
   const line = (...parts: unknown[]) => process.stderr.write(`[dsh-telegram] ${parts.join(' ')}\n`)
   const logger = { warn: (...a: unknown[]) => line('WARN', ...a), error: (...a: unknown[]) => line('ERROR', ...a) }
   const defaultCwd = process.cwd()
-  const dataDir = config.dataDir ?? join(defaultCwd, 'data')
+  // Persist under a stable, DSH-home-relative path so a workspace switch (and
+  // the chat↔session binding) survives a DSH restart regardless of the host
+  // process's cwd at load time.
+  const dshHome = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? defaultCwd
+  const defaultDataDir = join(dshHome, 'plugin-data', 'dsh-telegram')
+  const dataDir = config.dataDir ?? defaultDataDir
 
   // Persistence + session manager + agent factory.
   const store = new StateStore({ dataDir })
@@ -142,6 +148,29 @@ export function apply(ctx: Context, config: TelegramConfig) {
       store,
       workspaceRoots: config.workspaceRoots ?? [defaultCwd],
       defaultCwd,
+      // This chat's effective working directory: the persisted choice takes
+      // precedence over the process cwd, so a workspace switch survives the
+      // /new and a DSH restart.
+      currentCwd: () => {
+        const saved = store.getChat(`${botId}:${chatId}`)?.cwd
+        return saved ?? defaultCwd
+      },
+      setCurrentCwd: (cwd) => {
+        const key = `${botId}:${chatId}`
+        const current = store.getChat(key)
+        // Merge, so the existing sessionId/botId binding is not clobbered.
+        store.setChat(key, { ...(current ?? {}), cwd, botId } as ChatState)
+        store.flush()
+      },
+      switchSession: async (sessionId, cwd) => {
+        // Bind this chat to an existing DSH session and persist the binding, so
+        // subsequent messages route into that session and it survives a restart.
+        sessions.bind(chatId, botId, sessionId, cwd ?? defaultCwd)
+        const key = `${botId}:${chatId}`
+        const current = store.getChat(key)
+        store.setChat(key, { ...(current ?? {}), sessionId, cwd: cwd ?? defaultCwd, botId } as ChatState)
+        store.flush()
+      },
       provider,
       model,
       // Filled per-callback by the bot manager (authorization).
@@ -244,6 +273,34 @@ export function apply(ctx: Context, config: TelegramConfig) {
       },
       listWorkspaces: async () => {
         const set = new Set<string>([defaultCwd, ...(config.workspaceRoots ?? [])])
+        // 1) Typert gateway RPC: workspace.list -> { items: [{ path, title }] }.
+        //    This is the channel dsh-im uses and returns ALL registered workspaces.
+        try {
+          const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
+            { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ path?: string }> }> } | undefined
+          if (gw?.invoke !== undefined) {
+            for (const ns of ['workspace', 'workspaces'] as const) {
+              const value = await gw.invoke({ namespace: ns, method: 'list', args: {} })
+              const items = value?.items ?? []
+              for (const it of items) if (typeof it?.path === 'string' && it.path) set.add(it.path)
+              if (items.length > 0) break
+            }
+          }
+        } catch { /* continue */ }
+        // 2) Direct persistence fallback: read the workspace registry file so the
+        //    list never empties even when the runtime channel is unavailable.
+        try {
+          const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? ''
+          if (home !== '') {
+            const wsFile = join(home, 'storages', 'workspace.json')
+            const parsed = JSON.parse(readFileSync(wsFile, 'utf8')) as
+              { tables?: { workspaces?: Record<string, { path?: string }> } } | null
+            for (const ws of Object.values(parsed?.tables?.workspaces ?? {})) {
+              if (typeof ws?.path === 'string' && ws.path) set.add(ws.path)
+            }
+          }
+        } catch { /* best-effort */ }
+        // 3) Fall back to any cwd seen on sessions.
         try {
           const sessionsSvc = (ctx.get as (k: string) => unknown)?.('sessions') as
             { list?(): Promise<Array<{ cwd?: string }>> } | undefined
@@ -255,12 +312,56 @@ export function apply(ctx: Context, config: TelegramConfig) {
         return [...set]
       },
       listSessions: async () => {
+        const out: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }> = []
+        const seen = new Set<string>()
+        const push = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number } | undefined) => {
+          if (s === undefined || !s.id || seen.has(s.id)) return
+          seen.add(s.id)
+          out.push({
+            id: s.id,
+            cwd: s.cwd,
+            title: s.title,
+            displayTitle: s.displayTitle ?? s.title ?? s.id,
+            updatedAt: s.updatedAt ?? 0,
+          })
+        }
+        // 1) Typert gateway RPC: session.list -> { items: [ { sessionId, cwd?,
+        //    updatedAt, projections: { values: { title } } } ] } (dsh-im's channel).
         try {
-          const sessionsSvc = (ctx.get as (k: string) => unknown)?.('sessions') as
-            { list?(): Promise<Array<{ id?: string; cwd?: string; title?: string }>> } | undefined
-          const list = await sessionsSvc?.list?.()
-          return (Array.isArray(list) ? list : []).map(s => ({ id: s.id ?? '', cwd: s.cwd, title: s.title }))
-        } catch { return [] }
+          const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
+            { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ sessionId?: string; cwd?: string; updatedAt?: number; projections?: { values?: { title?: string } } }> }> } | undefined
+          if (gw?.invoke !== undefined) {
+            for (const ns of ['session', 'sessions'] as const) {
+              const value = await gw.invoke({ namespace: ns, method: 'list', args: {} })
+              const items = value?.items ?? []
+              for (const it of items) {
+                push({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt })
+              }
+              if (items.length > 0) break
+            }
+          }
+        } catch { /* continue */ }
+        // 2) Direct persistence fallback: read the session cache files so the
+        //    list never empties even when the runtime channel is unavailable.
+        if (out.length === 0) {
+          try {
+            const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? ''
+            if (home !== '') {
+              const sdir = join(home, 'storages', 'session_projcache', 'sessions')
+              for (const name of readdirSync(sdir)) {
+                if (!name.endsWith('.json')) continue
+                let parsed: { record?: { identity?: { cwd?: string; createdAt?: number }; rows?: { title?: { val?: unknown }; sessionListMetadata?: { val?: { lastPromptAt?: number } } } } } | null
+                try { parsed = JSON.parse(readFileSync(join(sdir, name), 'utf8')) } catch { continue }
+                const rec = parsed?.record
+                const id = name.slice(0, -5)
+                const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
+                const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
+                push({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt })
+              }
+            }
+          } catch { /* best-effort */ }
+        }
+        return out
       },
     }),
     logger,

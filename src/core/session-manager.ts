@@ -84,6 +84,15 @@ export class SessionManager {
     return this.bindings.get(sessionKey(botId, chatId))
   }
 
+  /**
+   * This chat's persisted working directory (from the state store), or the
+   * process default. Used to pick the cwd for a fresh session so a workspace
+   * switch survives a `/new` and a DSH restart.
+   */
+  chatCwd(chatId: number, botId: string): string {
+    return this.store.getChat(sessionKey(botId, chatId))?.cwd ?? this.defaultCwd
+  }
+
   /** Find the binding owning a given DSH session id (for event routing). */
   bySessionId(sessionId: string): SessionBinding | undefined {
     for (const binding of this.bindings.values()) {
@@ -170,7 +179,7 @@ export class SessionManager {
     const key = sessionKey(botId, chatId)
     const existing = this.bindings.get(key)
     if (existing !== undefined) return existing
-    return this.create(key, chatId, botId, cwd ?? this.defaultCwd, 0)
+    return this.create(key, chatId, botId, cwd ?? this.chatCwd(chatId, botId), 0)
   }
 
   /** Rotate to a fresh session (`/new`); disposes the previous agent. */
@@ -178,7 +187,7 @@ export class SessionManager {
     const key = sessionKey(botId, chatId)
     const previous = this.bindings.get(key)
     const generation = (previous?.generation ?? 0) + 1
-    const binding = await this.create(key, chatId, botId, previous?.cwd ?? this.defaultCwd, generation)
+    const binding = await this.create(key, chatId, botId, previous?.cwd ?? this.chatCwd(chatId, botId), generation)
     if (previous !== undefined) {
       await previous.handle.dispose().catch(error => {
         this.logger?.warn(`[tg] dispose old agent failed: ${messageOf(error)}`)

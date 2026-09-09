@@ -61,6 +61,12 @@ export declare class SessionManager {
     constructor(options: SessionManagerOptions);
     /** Live binding for a chat, or undefined. */
     get(chatId: number, botId: string): SessionBinding | undefined;
+    /**
+     * This chat's persisted working directory (from the state store), or the
+     * process default. Used to pick the cwd for a fresh session so a workspace
+     * switch survives a `/new` and a DSH restart.
+     */
+    chatCwd(chatId: number, botId: string): string;
     /** Find the binding owning a given DSH session id (for event routing). */
     bySessionId(sessionId: string): SessionBinding | undefined;
     /**
