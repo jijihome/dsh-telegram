@@ -38,6 +38,10 @@ export interface MenuCtx {
         name: string;
     }>>;
     setPreset(id: string): Promise<void>;
+    /** Display name of the current work mode (selected preset, or the default). */
+    getCurrentPresetName(): Promise<string>;
+    /** Current work-mode preset id (per-chat selection, else the default). */
+    getCurrentPresetId(): Promise<string>;
     listWorkspaces(): Promise<string[]>;
     listSessions(): Promise<Array<{
         id: string;
@@ -55,7 +59,7 @@ export interface MenuResult {
     keyboard?: TelegramInlineKeyboard;
 }
 /** Main menu text: status summary (when ctx is given), no menu-title banner. */
-export declare function mainMenuText(ctx?: MenuCtx): string;
+export declare function mainMenuText(ctx?: MenuCtx): Promise<string>;
 /** Main menu keyboard (rows). */
 export declare function mainMenuKeyboard(): TelegramInlineKeyboard;
 /** Handle one callback `data`. Returns the text + keyboard to send/show. */

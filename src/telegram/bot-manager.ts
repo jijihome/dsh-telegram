@@ -158,9 +158,9 @@ export class BotManager {
       if (menuCtx !== undefined) {
         menuCtx.userId = message.from?.id ?? 0
         menuCtx.canOperate = this.isAllowed(menuCtx.userId)
-        await delivery.sendMenu(chatId, mainMenuText(menuCtx), mainMenuKeyboard())
+        await delivery.sendMenu(chatId, await mainMenuText(menuCtx), mainMenuKeyboard())
       } else {
-        await delivery.sendMenu(chatId, mainMenuText(), mainMenuKeyboard())
+        await delivery.sendMenu(chatId, await mainMenuText(), mainMenuKeyboard())
       }
       return
     }

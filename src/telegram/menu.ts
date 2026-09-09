@@ -8,7 +8,7 @@
 
 import type { Delivery } from './delivery.js'
 import type { SessionManager } from '../core/session-manager.js'
-import type { StateStore, ChatState } from '../core/state-store.js'
+import type { StateStore } from '../core/state-store.js'
 import type { TelegramInlineKeyboard } from './api.js'
 
 /** Capabilities a menu action needs (injected from the plugin entry point). */
@@ -31,6 +31,10 @@ export interface MenuCtx {
   setModel(provider: string, model: string): Promise<void>
   listPresets(): Promise<Array<{ id: string; name: string }>>
   setPreset(id: string): Promise<void>
+  /** Display name of the current work mode (selected preset, or the default). */
+  getCurrentPresetName(): Promise<string>
+  /** Current work-mode preset id (per-chat selection, else the default). */
+  getCurrentPresetId(): Promise<string>
   listWorkspaces(): Promise<string[]>
   listSessions(): Promise<Array<{ id: string; cwd?: string; title?: string }>>
   /** Return a host-process snapshot for the ops info panel. */
@@ -60,7 +64,7 @@ const OPS_RESTART = 'menu:ops:restart'
 const OPS_INFO = 'menu:ops:info'
 
 /** Main menu text: status summary (when ctx is given), no menu-title banner. */
-export function mainMenuText(ctx?: MenuCtx): string {
+export async function mainMenuText(ctx?: MenuCtx): Promise<string> {
   if (ctx === undefined) return '选择功能:'
   return statusText(ctx)
 }
@@ -113,7 +117,7 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
     case OPS_INFO:
       return doOpsInfo(ctx)
     case BACK:
-      return { text: mainMenuText(ctx), keyboard: mainMenuKeyboard() }
+      return { text: await mainMenuText(ctx), keyboard: mainMenuKeyboard() }
     default:
       // Namespaced sub-actions: workspace:<path>, model:<provider>:<model>, preset:<id>
       // Namespaced sub-actions: workspace:<path>, model:<provider>:<model>, preset:<id>, session:<id>
@@ -143,16 +147,16 @@ async function doClear(ctx: MenuCtx): Promise<MenuResult> {
   }
 }
 
-/** Status summary text: session / cwd / model / binding (shown at menu top). */
-function statusText(ctx: MenuCtx): string {
+/** Status summary text: session / cwd / work mode / model / binding (menu top). */
+async function statusText(ctx: MenuCtx): Promise<string> {
   const own = ctx.sessions.get(ctx.chatId, ctx.botId)
   const bound = ctx.sessions.getBound(ctx.chatId, ctx.botId)
   const model = ctx.getCurrentModel()
-  // Selected work mode (preset) is persisted on the chat state by setPreset.
-  const persisted = ctx.store.getChat(`${ctx.botId}:${ctx.chatId}`) as
-    (ChatState & { agentPreset?: string }) | undefined
-  const cwd = own?.cwd ?? bound?.cwd ?? persisted?.cwd ?? ctx.defaultCwd
-  const workMode = persisted?.agentPreset ?? '默认'
+  const cwd = own?.cwd ?? bound?.cwd ?? ctx.defaultCwd
+  // Resolve the effective work-mode display name (selected preset or the
+  // deployment default), so it matches the names listed in the switch menu.
+  let workMode = '默认'
+  try { workMode = await ctx.getCurrentPresetName() } catch { /* keep fallback */ }
   const lines = [
     '📊 当前状态:',
   ]
@@ -234,7 +238,7 @@ async function doModel(ctx: MenuCtx): Promise<MenuResult> {
   }
 }
 
-/** Preset (work mode) submenu: list available presets. */
+/** Preset (work mode) submenu: list available presets, marking the current one. */
 async function doPreset(ctx: MenuCtx): Promise<MenuResult> {
   let presets: Array<{ id: string; name: string }>
   try {
@@ -245,9 +249,14 @@ async function doPreset(ctx: MenuCtx): Promise<MenuResult> {
   if (presets.length === 0) {
     return { text: '🧭 暂无预设列表', keyboard: mainMenuKeyboard() }
   }
-  const rows: Array<Array<[string, string]>> = presets.map(p => [[p.name, `preset:${p.id}`]])
+  let currentId: string | undefined
+  try { currentId = await ctx.getCurrentPresetId() } catch { currentId = undefined }
+  const rows: Array<Array<[string, string]>> = presets.map(p => {
+    const sel = currentId !== undefined && p.id === currentId
+    return [[`${sel ? '✔ ' : ''}${p.name}`, `preset:${p.id}`]]
+  })
   return {
-    text: '🧭 切换工作方式(预设);将新开会话生效:',
+    text: '🧭 切换工作方式(预设);当前用 ✔ 标记;将新开会话生效:',
     keyboard: withBack(rows),
   }
 }
