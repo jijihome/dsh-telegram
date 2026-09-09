@@ -9,7 +9,7 @@
  *
  * @module telegram/delivery
  */
-import type { TelegramClientLike } from './api.js';
+import type { TelegramClientLike, TelegramInlineKeyboard } from './api.js';
 export interface DeliveryOptions {
     /** Telegram API client (bound to one bot). */
     client: TelegramClientLike;
@@ -20,6 +20,8 @@ export interface DeliveryOptions {
         error(...args: unknown[]): void;
         warn(...args: unknown[]): void;
     };
+    /** If set, every text actually sent/edited to Telegram is appended here. */
+    forwardLogPath?: string;
 }
 /**
  * Handles delivery for one bot. Created per bot so state never leaks across
@@ -29,13 +31,18 @@ export declare class Delivery {
     private readonly client;
     private readonly maxMessageLength;
     private readonly logger;
+    private readonly forwardLogPath;
     private readonly live;
     constructor(options: DeliveryOptions);
+    /** Append the exact text about to be sent/edited to the forward log file. */
+    private logForward;
     /**
      * Send a final (already complete) message: split into ≤ maxLength chunks;
      * HTML parse failures fall back to plain text for that chunk.
      */
     sendFinal(chatId: number, text: string): Promise<void>;
+    /** Send a message with an optional inline keyboard (menu navigation). */
+    sendMenu(chatId: number, text: string, keyboard?: TelegramInlineKeyboard): Promise<void>;
     /** Show the typing indicator (fire and forget). */
     typing(chatId: number): Promise<void>;
     /**

@@ -94,6 +94,23 @@ export function apply(ctx: Context, config: TelegramConfig) {
   const listener = new StreamListener({ ctx, sessions, deliveries, logger })
 
   // Bot manager: owns clients, polls, deliveries.
+  const provider = config.provider ?? 'deepseek-official'
+  const model = config.model ?? 'deepseek-v4-flash'
+  const readCurrentModel = () => {
+    try {
+      const adm = (ctx.get as (k: string) => unknown)?.('agentDefaultModel') as
+        { currentSelection?(): { provider: string; model: string } } | undefined
+      return adm?.currentSelection?.() ?? { provider, model }
+    } catch {
+      return { provider, model }
+    }
+  }
+  const switchModel = async (p: string, m: string) => {
+    const adm = (ctx.get as (k: string) => unknown)?.('agentDefaultModel') as
+      { saveSelection?(next: { provider: string; model: string }): Promise<void> } | undefined
+    if (adm?.saveSelection === undefined) throw new Error('agentDefaultModel.saveSelection unavailable')
+    await adm.saveSelection({ provider: p, model: m })
+  }
   const manager = new BotManager({
     bots,
     allowedUserIds: config.allowedUserIds ?? [],
@@ -104,6 +121,74 @@ export function apply(ctx: Context, config: TelegramConfig) {
     maxMessageLength: config.maxMessageLength ?? 4096,
     workspaceRoots: config.workspaceRoots ?? [defaultCwd],
     defaultCwd,
+    forwardLogPath: join(dataDir, 'forward.log'),
+    menuCtxFor: (chatId, botId) => ({
+      chatId,
+      botId,
+      delivery: deliveries.get(botId) as never,
+      sessions,
+      store,
+      workspaceRoots: config.workspaceRoots ?? [defaultCwd],
+      defaultCwd,
+      provider,
+      model,
+      getCurrentModel: readCurrentModel,
+      listModels: async () => {
+        const llm = (ctx.get as (k: string) => unknown)?.('llm') as
+          { listProviders?(): Promise<Array<{ id?: string; name?: string }>>; listModels?(provider: string): Promise<Array<{ provider?: string; id?: string; name?: string }>> } | undefined
+        if (llm?.listModels === undefined) return []
+        const out: Array<{ provider: string; model: string }> = []
+        let providers: Array<{ id?: string; name?: string }> = []
+        try { providers = (await llm.listProviders?.()) ?? [] } catch { providers = [] }
+        const ids: string[] = providers.length > 0 ? providers.map(p => p.id ?? p.name).filter((x): x is string => Boolean(x)) : [provider]
+        for (const id of ids) {
+          try {
+            const ms = await llm.listModels(id)
+            for (const m of (Array.isArray(ms) ? ms : [])) {
+              out.push({ provider: m.provider ?? id, model: m.id ?? m.name ?? id })
+            }
+          } catch { /* a provider that cannot enumerate models is skipped */ }
+        }
+        return out
+      },
+      setModel: switchModel,
+      listPresets: async () => {
+        const ap = (ctx.get as (k: string) => unknown)?.('agentPresets') as
+          { list?(): Promise<Array<{ id: string; name?: string; description?: string }>> } | undefined
+        if (ap?.list === undefined) return []
+        try {
+          const presets = await ap.list()
+          return Array.isArray(presets) ? presets.map(p => ({ id: p.id, name: p.name ?? p.id })) : []
+        } catch { return [] }
+      },
+      setPreset: async (id) => {
+        // Presets shape the agent at creation time; switching records the choice
+        // so the next fresh session composes with it. A live runtime swap on a
+        // running agent is a later refinement.
+        const current = store.getChat(`${botId}:${chatId}`)
+        store.setChat(`${botId}:${chatId}`, { ...(current ?? {}), agentPreset: id } as never)
+      },
+      listWorkspaces: async () => {
+        const set = new Set<string>([defaultCwd, ...(config.workspaceRoots ?? [])])
+        try {
+          const sessionsSvc = (ctx.get as (k: string) => unknown)?.('sessions') as
+            { list?(): Promise<Array<{ cwd?: string }>> } | undefined
+          const sessions = await sessionsSvc?.list?.()
+          for (const s of (sessions ?? [])) {
+            if (typeof s.cwd === 'string' && s.cwd) set.add(s.cwd)
+          }
+        } catch { /* best-effort; fall back to the configured roots */ }
+        return [...set]
+      },
+      listSessions: async () => {
+        try {
+          const sessionsSvc = (ctx.get as (k: string) => unknown)?.('sessions') as
+            { list?(): Promise<Array<{ id?: string; cwd?: string; title?: string }>> } | undefined
+          const list = await sessionsSvc?.list?.()
+          return (Array.isArray(list) ? list : []).map(s => ({ id: s.id ?? '', cwd: s.cwd, title: s.title }))
+        } catch { return [] }
+      },
+    }),
     logger,
   })
 

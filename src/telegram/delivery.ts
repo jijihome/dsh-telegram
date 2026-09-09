@@ -10,8 +10,9 @@
  * @module telegram/delivery
  */
 
-import type { TelegramClientLike } from './api.js'
+import type { TelegramClientLike, TelegramInlineKeyboard } from './api.js'
 import { markdownToHtml, splitMessage } from '../core/format.js'
+import { appendFileSync } from 'node:fs'
 
 export interface DeliveryOptions {
   /** Telegram API client (bound to one bot). */
@@ -20,6 +21,8 @@ export interface DeliveryOptions {
   maxMessageLength?: number
   /** Logger (`error(message)` / `warn(message)`). */
   logger?: { error(...args: unknown[]): void; warn(...args: unknown[]): void }
+  /** If set, every text actually sent/edited to Telegram is appended here. */
+  forwardLogPath?: string
 }
 
 /** One in-flight streaming segment per chat. */
@@ -59,12 +62,24 @@ export class Delivery {
   private readonly client: TelegramClientLike
   private readonly maxMessageLength: number
   private readonly logger: DeliveryOptions['logger'] | undefined
+  private readonly forwardLogPath: string | undefined
   private readonly live = new Map<number, LiveSegment>()
 
   constructor(options: DeliveryOptions) {
     this.client = options.client
     this.maxMessageLength = options.maxMessageLength ?? 4096
     this.logger = options.logger
+    this.forwardLogPath = options.forwardLogPath
+  }
+
+  /** Append the exact text about to be sent/edited to the forward log file. */
+  private logForward(kind: string, text: string): void {
+    if (this.forwardLogPath === undefined) return
+    try {
+      appendFileSync(this.forwardLogPath, `[${new Date().toISOString()}] [${kind}] ${text}\n`, 'utf8')
+    } catch {
+      // Logging must never break delivery.
+    }
   }
 
   /**
@@ -74,6 +89,23 @@ export class Delivery {
   async sendFinal(chatId: number, text: string): Promise<void> {
     for (const chunk of splitMessage(text, this.maxMessageLength)) {
       await this.safeSend(chatId, chunk, 'HTML')
+    }
+  }
+
+  /** Send a message with an optional inline keyboard (menu navigation). */
+  async sendMenu(chatId: number, text: string, keyboard?: TelegramInlineKeyboard): Promise<void> {
+    const body = markdownToHtml(text)
+    this.logForward('menu', body)
+    try {
+      await this.client.sendMessage(chatId, body, 'HTML', keyboard)
+      return
+    } catch (error) {
+      this.logger?.warn(`[tg] menu send fallback: ${messageOf(error)}`)
+    }
+    try {
+      await this.client.sendMessage(chatId, text, undefined, keyboard)
+    } catch (error) {
+      this.logger?.error(`[tg] menu send failed: ${messageOf(error)}`)
     }
   }
 
@@ -182,12 +214,14 @@ export class Delivery {
     if (seg.messageId === undefined) {
       // First delivery: send the live message (HTML, plain-text fallback).
       try {
+        this.logForward('send', html)
         const sent = await this.with429Retry(() => this.client.sendMessage(chatId, html, 'HTML'))
         seg.messageId = sent.message_id
         seg.lastText = html
       } catch (error) {
         this.logger?.warn(`[tg] live send fallback: ${messageOf(error)}`)
         try {
+          this.logForward('send', seg.buffer)
           const sent = await this.with429Retry(() => this.client.sendMessage(chatId, seg.buffer))
           seg.messageId = sent.message_id
           seg.lastText = seg.buffer
@@ -199,6 +233,7 @@ export class Delivery {
       return
     }
     try {
+      this.logForward('edit', html)
       await this.with429Retry(() => this.client.editMessageText(chatId, seg.messageId!, html, 'HTML'))
       seg.lastText = html
     } catch (error) {
@@ -245,6 +280,7 @@ export class Delivery {
   private async safeSend(chatId: number, text: string, parseMode?: 'HTML'): Promise<void> {
     try {
       const body = parseMode === 'HTML' ? markdownToHtml(text) : text
+      this.logForward('send', body)
       await this.client.sendMessage(chatId, body, parseMode)
     } catch (error) {
       if (parseMode === 'HTML') {

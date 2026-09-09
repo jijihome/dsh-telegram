@@ -36,6 +36,23 @@ export interface TelegramMessage {
 export interface TelegramUpdate {
     readonly update_id: number;
     readonly message?: TelegramMessage;
+    readonly callback_query?: TelegramCallbackQuery;
+}
+/** Inline keyboard button (menu). */
+export interface TelegramInlineButton {
+    readonly text: string;
+    readonly callback_data?: string;
+}
+/** Inline keyboard (rows of buttons) attached to a message. */
+export interface TelegramInlineKeyboard {
+    readonly inline_keyboard: readonly (readonly TelegramInlineButton[])[];
+}
+/** A callback_query update (a menu button was pressed). */
+export interface TelegramCallbackQuery {
+    readonly id: string;
+    readonly from?: TelegramUser;
+    readonly message?: TelegramMessage;
+    readonly data?: string;
 }
 /** Runtime seam surface tests substitute with a fake. */
 export interface TelegramClientLike {
@@ -43,10 +60,12 @@ export interface TelegramClientLike {
     getMe(): Promise<TelegramUser>;
     /** Long-poll for updates at or after `offset`. */
     getUpdates(offset?: number): Promise<TelegramUpdate[]>;
-    /** Send a message, optionally with HTML parse mode. */
-    sendMessage(chatId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /** Send a message, optionally with HTML parse mode and an inline keyboard. */
+    sendMessage(chatId: number, text: string, parseMode?: 'HTML', replyMarkup?: TelegramInlineKeyboard): Promise<TelegramMessage>;
     /** Replace the text of a previously sent message (incremental streaming). */
     editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /** Acknowledge a callback_query; optionally show a toast. */
+    answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>;
     /** Send a chat action such as `typing`. */
     sendChatAction(chatId: number, action: string): Promise<boolean>;
 }
@@ -90,13 +109,14 @@ export declare class TelegramClient implements TelegramClientLike {
      */
     getUpdates(offset?: number): Promise<TelegramUpdate[]>;
     /**
-     * Send a text message, optionally with HTML parse mode.
+     * Send a text message, optionally with HTML parse mode and an inline keyboard.
      * @param chatId - target chat id.
      * @param text - the message text.
      * @param parseMode - `HTML` when the text is Telegram-HTML, else plain text.
+     * @param replyMarkup - inline keyboard to attach (for menu navigation).
      * @returns the delivered message object.
      */
-    sendMessage(chatId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    sendMessage(chatId: number, text: string, parseMode?: 'HTML', replyMarkup?: TelegramInlineKeyboard): Promise<TelegramMessage>;
     /**
      * Replace the text of a previously sent message. Used to stream incremental
      * model output into one growing message instead of spamming new ones.
@@ -107,6 +127,13 @@ export declare class TelegramClient implements TelegramClientLike {
      * @returns the edited message object.
      */
     editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML'): Promise<TelegramMessage>;
+    /**
+     * Acknowledge a callback_query (menu button press) so Telegram stops the
+     * loading spinner; optionally show a short toast.
+     * @param callbackQueryId - the callback query id.
+     * @param text - optional toast text (shown briefly near the button).
+     */
+    answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>;
     /**
      * Send a chat action such as `typing`; Telegram shows it briefly while a
      * real message is on the way.

@@ -14,11 +14,12 @@ import type { BotConfig } from '../config.js'
 import { TelegramClient } from './api.js'
 import { LongPoll } from './long-poll.js'
 import { Delivery } from './delivery.js'
-import type { TelegramUpdate } from './api.js'
+import type { TelegramUpdate, TelegramCallbackQuery } from './api.js'
 import type { CommandContext } from '../commands/index.js'
 import { handleCommand } from '../commands/index.js'
 import type { SessionManager } from '../core/session-manager.js'
 import type { StateStore } from '../core/state-store.js'
+import { handleMenuCallback, mainMenuKeyboard, mainMenuText, type MenuCtx } from './menu.js'
 
 export interface BotManagerOptions {
   bots: BotConfig[]
@@ -32,6 +33,10 @@ export interface BotManagerOptions {
   maxMessageLength: number
   workspaceRoots: string[]
   defaultCwd: string
+  /** If set, every text sent to Telegram is appended to this file. */
+  forwardLogPath?: string
+  /** Build a MenuCtx for a chat/client (injected from the plugin entry). */
+  menuCtxFor?: (chatId: number, botId: string) => MenuCtx
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -100,6 +105,7 @@ export class BotManager {
       client,
       maxMessageLength: this.options.maxMessageLength,
       logger,
+      ...(this.options.forwardLogPath !== undefined ? { forwardLogPath: this.options.forwardLogPath } : {}),
     })
     const poll = new LongPoll({
       client,
@@ -124,6 +130,13 @@ export class BotManager {
 
   /** Route one Telegram update: authorize, then command or agent follow-up. */
   private async handleUpdate(bot: BotConfig, update: TelegramUpdate): Promise<void> {
+    const api = this.runtimes.get(bot.id)?.client
+    // Menu button press → run the menu action and show the result.
+    const callbackQuery = update.callback_query
+    if (callbackQuery !== undefined) {
+      await this.handleCallback(bot, callbackQuery)
+      return
+    }
     const message = update.message
     if (message === undefined) return
     const chatId = message.chat.id
@@ -138,6 +151,12 @@ export class BotManager {
     if (runtime === undefined) return
     const { delivery, bot: cfg } = runtime
     const text = message.text ?? ''
+
+    // /menu shows the inline keyboard menu.
+    if (/^\/(menu)$/.test(text.trim())) {
+      await delivery.sendMenu(chatId, mainMenuText(), mainMenuKeyboard())
+      return
+    }
 
     // Commands are handled locally.
     const cmdCtx: CommandContext = {
@@ -189,5 +208,33 @@ export class BotManager {
   private isAllowed(userId: number): boolean {
     if (this.options.allowAllUsers) return true
     return this.options.allowedUserIds.includes(userId)
+  }
+
+  /** Handle a callback_query (menu button press). */
+  private async handleCallback(bot: BotConfig, callbackQuery: TelegramCallbackQuery): Promise<void> {
+    const runtime = this.runtimes.get(bot.id)
+    if (runtime === undefined) return
+    const { delivery, bot: cfg, client } = runtime
+    const chatId = callbackQuery.message?.chat?.id
+    if (chatId === undefined) return
+    // Acknowledge the press (stops Telegram's loading spinner).
+    try {
+      await client.answerCallbackQuery(callbackQuery.id)
+    } catch (error) {
+      this.options.logger?.warn(`[tg] answerCallbackQuery failed: ${messageOf(error)}`)
+    }
+    const data = callbackQuery.data ?? ''
+    const menuCtx = this.options.menuCtxFor?.(chatId, cfg.id)
+    if (menuCtx === undefined) {
+      await delivery.sendFinal(chatId, '菜单不可用')
+      return
+    }
+    try {
+      const result = await handleMenuCallback(data, menuCtx)
+      await delivery.sendMenu(chatId, result.text, result.keyboard)
+    } catch (error) {
+      this.options.logger?.error(`[tg] menu callback failed: ${messageOf(error)}`)
+      await delivery.sendFinal(chatId, `❌ 菜单执行失败:${messageOf(error)}`)
+    }
   }
 }

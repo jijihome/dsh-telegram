@@ -15,6 +15,7 @@ import { LongPoll } from './long-poll.js';
 import { Delivery } from './delivery.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { StateStore } from '../core/state-store.js';
+import { type MenuCtx } from './menu.js';
 export interface BotManagerOptions {
     bots: BotConfig[];
     /** Telegram user ids allowed to talk; empty = none unless allowAllUsers. */
@@ -27,6 +28,10 @@ export interface BotManagerOptions {
     maxMessageLength: number;
     workspaceRoots: string[];
     defaultCwd: string;
+    /** If set, every text sent to Telegram is appended to this file. */
+    forwardLogPath?: string;
+    /** Build a MenuCtx for a chat/client (injected from the plugin entry). */
+    menuCtxFor?: (chatId: number, botId: string) => MenuCtx;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -60,4 +65,6 @@ export declare class BotManager {
     private handleUpdate;
     /** Whitelist or allow-all check. */
     private isAllowed;
+    /** Handle a callback_query (menu button press). */
+    private handleCallback;
 }

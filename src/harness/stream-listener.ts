@@ -138,9 +138,9 @@ export class StreamListener {
         await delivery.appendDelta(chatId, message.text)
         break
       case 'tool-call-delta':
-        // Overlay: append tool name + argument text into the live segment.
-        if (message.name !== '') await delivery.appendDelta(chatId, `\n🛠 ${message.name}`)
-        await delivery.appendDelta(chatId, message.argumentsDelta)
+        // Default: do NOT forward tool-call events to Telegram — tool names /
+        // argument deltas render as fragmented text there. A later "message
+        // switch" config option will let the user choose which kinds to send.
         break
       case 'assistant-final':
         await delivery.endLive(chatId)

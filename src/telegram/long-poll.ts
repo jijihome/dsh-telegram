@@ -91,7 +91,9 @@ export class LongPoll {
         continue
       }
       for (const update of updates) {
-        if (update.message === undefined) continue
+        // Only message and callback_query updates matter; both must advance
+        // the offset and reach the handler (callback_query has no message).
+        if (update.message === undefined && update.callback_query === undefined) continue
         this.offset = update.update_id + 1
         try {
           await this.onUpdate(update)
