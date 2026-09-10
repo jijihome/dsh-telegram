@@ -147,6 +147,31 @@ export function apply(ctx: Context, config: TelegramConfig) {
     }
   }
 
+  /**
+   * Model recorded on a session that has no live agent yet, read from the host's
+   * session projection cache (`session_projcache`). It makes the status panel show
+   * the inherited conversation model right after a restart instead of the
+   * deployment default — without waiting for the first message to spin the agent up.
+   */
+  const readSessionModelFromCache = (sessionId: string): { provider: string; model: string } | undefined => {
+    const pick = (value: unknown): { provider: string; model: string } | undefined => {
+      if (value === null || typeof value !== 'object') return undefined
+      const record = value as { provider?: unknown; model?: unknown }
+      if (typeof record.provider !== 'string' || record.provider === '') return undefined
+      if (typeof record.model !== 'string' || record.model === '') return undefined
+      return { provider: record.provider, model: record.model }
+    }
+    try {
+      const file = join(dshHome, 'storages', 'session_projcache', 'sessions', `${sessionId}.json`)
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as
+        { record?: { rows?: { modelSelection?: { val?: { next?: unknown; lastUsed?: unknown } } } } } | null
+      const view = parsed?.record?.rows?.modelSelection?.val
+      return pick(view?.next) ?? pick(view?.lastUsed)
+    } catch {
+      return undefined
+    }
+  }
+
   const factory = new DshAgentFactory(ctx)
   const sessions = new SessionManager({
     factory,
@@ -154,6 +179,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
     scopes: scopeById,
     defaultCwd,
     defaultSelection: readDefaultSelection,
+    sessionModelLookup: readSessionModelFromCache,
     logger,
   })
 

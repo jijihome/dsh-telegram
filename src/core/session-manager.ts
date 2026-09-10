@@ -71,6 +71,13 @@ export interface SessionManagerOptions {
    * when a bot does not pin its own provider/model. Must never write.
    */
   defaultSelection?: () => { provider: string; model: string } | undefined
+  /**
+   * Read-only lookup of the model recorded on a session that has no live agent
+   * yet (read from the host's session projection store). Lets the status panel
+   * show the inherited model right after a restart, instead of the deployment
+   * default, without waiting for the first message to spin the agent up.
+   */
+  sessionModelLookup?: (sessionId: string) => { provider: string; model: string } | undefined
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -120,6 +127,7 @@ export class SessionManager {
   private readonly scopes: ReadonlyMap<string, BotScope>
   private readonly defaultCwd: string
   private readonly defaultSelection: SessionManagerOptions['defaultSelection']
+  private readonly sessionModelLookup: SessionManagerOptions['sessionModelLookup']
   private readonly logger: SessionManagerOptions['logger'] | undefined
   private readonly bindings = new Map<string, SessionBinding>()
   /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */
@@ -138,6 +146,7 @@ export class SessionManager {
     this.scopes = options.scopes
     this.defaultCwd = options.defaultCwd
     this.defaultSelection = options.defaultSelection
+    this.sessionModelLookup = options.sessionModelLookup
     this.logger = options.logger
   }
 
@@ -464,7 +473,10 @@ export class SessionManager {
       if (sameSession) return { provider: state.provider, model: state.model, source: 'chat' }
     }
     if (active !== undefined) {
-      const inherited = this.factory.sessionSelection?.(active)
+      // Live agent first (authoritative), then the session's own persisted record
+      // so a restart shows the inherited model before the first message spins the
+      // agent up.
+      const inherited = this.factory.sessionSelection?.(active) ?? this.sessionModelLookup?.(active)
       if (inherited !== undefined && inherited.provider !== '' && inherited.model !== '') {
         return { provider: inherited.provider, model: inherited.model, source: 'session' }
       }

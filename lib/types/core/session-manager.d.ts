@@ -66,6 +66,16 @@ export interface SessionManagerOptions {
         provider: string;
         model: string;
     } | undefined;
+    /**
+     * Read-only lookup of the model recorded on a session that has no live agent
+     * yet (read from the host's session projection store). Lets the status panel
+     * show the inherited model right after a restart, instead of the deployment
+     * default, without waiting for the first message to spin the agent up.
+     */
+    sessionModelLookup?: (sessionId: string) => {
+        provider: string;
+        model: string;
+    } | undefined;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -107,6 +117,7 @@ export declare class SessionManager {
     private readonly scopes;
     private readonly defaultCwd;
     private readonly defaultSelection;
+    private readonly sessionModelLookup;
     private readonly logger;
     private readonly bindings;
     /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */

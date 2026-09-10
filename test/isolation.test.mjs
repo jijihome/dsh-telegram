@@ -766,3 +766,23 @@ test('the config binding is seeded only into the chat state, and the choice surv
   assert.equal(restarted.activeSessionId(5, 'bot-a'), 'session-chosen-by-user',
     'the restart keeps driving the conversation the operator picked')
 })
+
+test('an offline session still shows its own model (no wait for the first message)', () => {
+  const env = makeEnv()
+  // No live agent anywhere: the factory cannot answer, so the lookup does.
+  const manager = new SessionManager({
+    factory: fakeFactory(),
+    stores: env.stores,
+    scopes: env.scopeById,
+    defaultCwd: 'E:/ws',
+    defaultSelection: () => ({ provider: 'host-prov', model: 'host-model' }),
+    sessionModelLookup: id => (id === 'session-cached' ? { provider: 'cmd', model: 'm-cached' } : undefined),
+    logger: silent,
+  })
+  manager.bind(5, 'bot-a', 'session-cached', 'E:/ws')
+  assert.deepEqual(manager.modelInfo(5, 'bot-a'), { provider: 'cmd', model: 'm-cached', source: 'session' })
+
+  // Unknown session -> the deployment default is still the fallback.
+  manager.bind(6, 'bot-a', 'session-unknown', 'E:/ws')
+  assert.deepEqual(manager.modelInfo(6, 'bot-a'), { provider: 'host-prov', model: 'host-model', source: 'host' })
+})
