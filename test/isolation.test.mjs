@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { resolveBotScopes, assertSessionOwnership } from '../lib/core/bot-scope.js'
 import { StateStore, migrateLegacyState, stateFilePath, botDataDir } from '../lib/core/state-store.js'
 import { SessionManager, preferSession } from '../lib/core/session-manager.js'
+import { scopeSessionsToDir } from '../lib/telegram/menu.js'
 import { DshAgentFactory } from '../lib/harness/agent-factory.js'
 import { StreamListener } from '../lib/harness/stream-listener.js'
 import { parseAgentDefaultModel, readHostDefaultModel } from '../lib/core/host-default-model.js'
@@ -785,4 +786,33 @@ test('an offline session still shows its own model (no wait for the first messag
   // Unknown session -> the deployment default is still the fallback.
   manager.bind(6, 'bot-a', 'session-unknown', 'E:/ws')
   assert.deepEqual(manager.modelInfo(6, 'bot-a'), { provider: 'host-prov', model: 'host-model', source: 'host' })
+})
+
+// ------------------------------------------------- session list directory scope
+
+test('the session list exposes only the current directory, never a foreign active session', () => {
+  const list = [
+    { id: 'a1', cwd: 'E:\\dir-a', updatedAt: 300 },
+    { id: 'a2', cwd: 'e:/DIR-A/', updatedAt: 100 },
+    { id: 'b1', cwd: 'E:\\dir-b', updatedAt: 200 },
+    { id: 'no-cwd', cwd: undefined, updatedAt: 400 },
+  ]
+  // Directory A: newest first, no session from B, and A's active session is marked.
+  const inA = scopeSessionsToDir(list, 'E:\\dir-a', 'a1')
+  assert.deepEqual(inA.scoped.map(s => s.id), ['a1', 'a2'], 'separator/case-insensitive match, newest first')
+  assert.equal(inA.activeInScope, true)
+
+  // Directory B: the session chosen in A must NOT appear, and there is no ✅.
+  const inB = scopeSessionsToDir(list, 'E:\\dir-b', 'a1')
+  assert.deepEqual(inB.scoped.map(s => s.id), ['b1'])
+  assert.equal(inB.activeInScope, false, 'an active session from another directory is not shown as selected')
+
+  // A directory with no sessions yields an empty scope (the menu then says so
+  // instead of silently listing every session again).
+  const empty = scopeSessionsToDir(list, 'E:\\dir-c', 'a1')
+  assert.deepEqual(empty.scoped, [])
+  assert.equal(empty.activeInScope, false)
+
+  // Entries without a cwd never match any directory.
+  assert.equal(scopeSessionsToDir(list, 'E:\\dir-a', 'no-cwd').scoped.some(s => s.id === 'no-cwd'), false)
 })

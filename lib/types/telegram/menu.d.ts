@@ -81,3 +81,18 @@ export declare function mainMenuText(ctx?: MenuCtx): Promise<string>;
 export declare function mainMenuKeyboard(): TelegramInlineKeyboard;
 /** Handle one callback `data`. Returns the text + keyboard to send/show. */
 export declare function handleMenuCallback(data: string, ctx: MenuCtx): Promise<MenuResult>;
+/**
+ * Scope a roster to one working directory (newest first) and report whether the
+ * chat's active session is part of that scope.
+ *
+ * Path comparison is separator/case-insensitive: the roster and the workspace
+ * picker do not always spell the same directory the same way.
+ */
+export declare function scopeSessionsToDir<T extends {
+    id: string;
+    cwd?: string;
+    updatedAt?: number;
+}>(list: readonly T[], currentCwd: string, activeSessionId: string | undefined): {
+    scoped: T[];
+    activeInScope: boolean;
+};

@@ -231,8 +231,14 @@ function formatTime(ms: number): string {
 }
 
 /**
- * Sessions submenu: list the chat's sessions, scoped to its current working
+ * Sessions submenu: list the sessions THAT BELONG TO the chat's current working
  * directory, as "time + title" rows; picking one switches this chat to it.
+ *
+ * The directory is the boundary of this list: a session from another directory is
+ * never shown here (an earlier fix pinned the active session unconditionally,
+ * which made a conversation from directory A keep appearing — already ticked —
+ * after switching to directory B). When the chat's active session lives in
+ * another directory the header says so instead of inventing a row for it.
  */
 async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
   let list: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>
@@ -241,52 +247,46 @@ async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
   } catch {
     list = []
   }
-  if (list.length === 0) {
-    return { text: '💬 暂无会话记录', keyboard: mainMenuKeyboard() }
-  }
   const currentCwd = ctx.currentCwd()
-  // The session this chat is currently on — config binding, live binding, or the
-  // id persisted for it. It is pinned as the FIRST row below: the host roster does
-  // not necessarily contain it (plugin-created sessions often are not listed, and
-  // a cwd filter can hide it), which made the ✅ marker impossible to see.
   const activeSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
-  const activeEntry = activeSessionId === undefined ? undefined : list.find(s => s.id === activeSessionId)
-  const others = list.filter(s => s.id !== activeSessionId)
-  // Scope to the chat's current working directory, newest first. Comparison is
-  // separator/case-insensitive: the roster (projcache, gateway) and the workspace
-  // picker do not always spell the same directory the same way.
-  const scoped = others
-    .filter(s => samePath(s.cwd, currentCwd))
-    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-  const sortedOthers = [...others].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-  const pool = scoped.length > 0 ? scoped : sortedOthers
-  const rows: Array<Array<[string, string]>> = []
-  if (activeSessionId !== undefined) {
-    const title = activeEntry?.displayTitle ?? activeEntry?.title ?? activeSessionId
-    const when = activeEntry !== undefined ? `${formatTime(activeEntry.updatedAt ?? 0)} · ` : ''
-    // Always present a marked row, even when the roster omits the session.
-    rows.push([['\u2705 ' + (activeEntry !== undefined ? when + title : `${title}(当前)`), `session:${activeSessionId}`]])
+  const { scoped, activeInScope } = scopeSessionsToDir(list, currentCwd, activeSessionId)
+  if (scoped.length === 0) {
+    return {
+      text: `💬 当前目录下暂无会话\n工作目录: ${currentCwd}\n(先用 📂 工作目录 切到目标目录,再从此处选择会话)`,
+      keyboard: mainMenuKeyboard(),
+    }
   }
-  for (const s of pool.slice(0, activeSessionId !== undefined ? 14 : 15)) {
+  const rows: Array<Array<[string, string]>> = scoped.slice(0, 15).map(s => {
     const title = s.displayTitle ?? s.title ?? s.id.slice(0, 12)
-    rows.push([[`${formatTime(s.updatedAt ?? 0)} · ${title}`, `session:${s.id}`]])
-  }
-  if (rows.length === 0) {
-    return { text: `💬 当前工作目录下暂无会话\n(工作目录 ${currentCwd})`, keyboard: mainMenuKeyboard() }
-  }
-  // Say out loud how the scope resolved. A silent fallback to "all sessions" made
-  // a directory switch look like a no-op, and a roster whose entries carry no cwd
-  // is indistinguishable from an empty directory without this line.
-  const scopeNote = scoped.length > 0
-    ? `当前目录 ${currentCwd} · 命中 ${scoped.length} 条`
-    : `当前目录无匹配(${currentCwd}) · 已回退为全部会话`
-  const cwdSample = scoped.length === 0 && others.length > 0
-    ? `\n会话列表 cwd 示例: ${[...new Set(others.map(s => s.cwd ?? '(无 cwd)'))].slice(0, 3).join(' | ')}`
+    const mark = s.id === activeSessionId ? '\u2705 ' : ''
+    return [[`${mark}${formatTime(s.updatedAt ?? 0)} · ${title}`, `session:${s.id}`]]
+  })
+  const awayNote = activeSessionId !== undefined && !activeInScope
+    ? '\n(本 chat 已选会话属于其它目录,故此处无 ✅;点 📂 工作目录 回到该目录即可看到)'
     : ''
   return {
-    text: `💬 会话(${scopeNote})${cwdSample}\n✅ 为当前会话(置顶);点选以切换该会话;时间为更新时间:`,
+    text: `💬 会话(当前目录 ${currentCwd} · 命中 ${scoped.length} 条)${awayNote}\n✅ 为当前会话;点选以切换该会话;时间为更新时间:`,
     keyboard: withBack(rows),
   }
+}
+
+/**
+ * Scope a roster to one working directory (newest first) and report whether the
+ * chat's active session is part of that scope.
+ *
+ * Path comparison is separator/case-insensitive: the roster and the workspace
+ * picker do not always spell the same directory the same way.
+ */
+export function scopeSessionsToDir<T extends { id: string; cwd?: string; updatedAt?: number }>(
+  list: readonly T[],
+  currentCwd: string,
+  activeSessionId: string | undefined,
+): { scoped: T[]; activeInScope: boolean } {
+  const scoped = list
+    .filter(s => samePath(s.cwd, currentCwd))
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  const activeInScope = activeSessionId !== undefined && scoped.some(s => s.id === activeSessionId)
+  return { scoped, activeInScope }
 }
 
 /**
