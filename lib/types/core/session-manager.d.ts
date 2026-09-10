@@ -58,6 +58,13 @@ export declare class SessionManager {
     private readonly bindings;
     /** Bound chats keyed by config key (`botId:chatId` or bare `chatId`). */
     private readonly bound;
+    /**
+     * Session ids this plugin is responsible for: every telegram agent it created
+     * / resumed, plus every session bound via config or the menu. Used as an O(1)
+     * gate by the stream listener so events from ANY OTHER session in the host
+     * are dropped silently instead of being scanned, routed, and logged.
+     */
+    private readonly relevant;
     constructor(options: SessionManagerOptions);
     /** Live binding for a chat, or undefined. */
     get(chatId: number, botId: string): SessionBinding | undefined;
@@ -67,6 +74,14 @@ export declare class SessionManager {
      * switch survives a `/new` and a DSH restart.
      */
     chatCwd(chatId: number, botId: string): string;
+    /** Mark a session id as one this plugin owns or is bound to (event gate). */
+    markRelevant(sessionId: string): void;
+    /**
+     * O(1) gate: is this session one the plugin should process events for?
+     * Everything the host emits other than our own agents / bound chats returns
+     * false, so the stream listener can ignore foreign sessions immediately.
+     */
+    isRelevant(sessionId: string): boolean;
     /** Find the binding owning a given DSH session id (for event routing). */
     bySessionId(sessionId: string): SessionBinding | undefined;
     /**

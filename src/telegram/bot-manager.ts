@@ -11,7 +11,7 @@
  */
 
 import type { BotConfig } from '../config.js'
-import { TelegramClient } from './api.js'
+import { TelegramClient, TelegramTransportError } from './api.js'
 import { LongPoll } from './long-poll.js'
 import { Delivery } from './delivery.js'
 import type { TelegramUpdate, TelegramCallbackQuery } from './api.js'
@@ -35,6 +35,11 @@ export interface BotManagerOptions {
   defaultCwd: string
   /** If set, every text sent to Telegram is appended to this file. */
   forwardLogPath?: string
+  /**
+   * HTTP/HTTPS proxy for Telegram traffic (e.g. `http://127.0.0.1:7897`).
+   * Passed to each bot's client; only Telegram requests use it.
+   */
+  proxy?: string
   /** Build a MenuCtx for a chat/client (injected from the plugin entry). */
   menuCtxFor?: (chatId: number, botId: string) => MenuCtx
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
@@ -92,6 +97,8 @@ export class BotManager {
     this.started = false
     const polls = [...this.runtimes.values()].map(runtime => runtime.poll.stop())
     await Promise.allSettled(polls)
+    // Dispose each client's proxy connection pool, if one was created.
+    for (const runtime of this.runtimes.values()) runtime.client.close()
     this.runtimes.clear()
   }
 
@@ -100,6 +107,7 @@ export class BotManager {
     const logger = this.options.logger
     const client = new TelegramClient(bot.token, {
       pollingTimeoutSec: this.options.pollingTimeoutSec,
+      ...(this.options.proxy !== undefined ? { proxy: this.options.proxy } : {}),
     })
     const delivery = new Delivery({
       client,
@@ -123,7 +131,11 @@ export class BotManager {
       poll.start()
     }).catch(error => {
       runtime.lastError = messageOf(error)
-      logger?.error(`[tg] bot "${bot.id}" token invalid: ${runtime.lastError}`)
+      // Transport failures ("network down", proxy, DNS…) must not be blamed
+      // on the token; only an HTTP/API error such as 401 makes the token
+      // itself invalid.
+      const label = error instanceof TelegramTransportError ? 'startup network check failed' : 'token invalid'
+      logger?.error(`[tg] bot "${bot.id}" ${label}: ${runtime.lastError}`)
     })
     return runtime
   }

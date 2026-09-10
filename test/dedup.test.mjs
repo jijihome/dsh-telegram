@@ -32,6 +32,9 @@ function fakeSessions(chatId, botId) {
   return {
     bySessionId: (id) => ({ chatId, botId, sessionId: id }),
     byBoundSessionId: () => undefined,
+    // The stream listener now gates on the plugin's own sessions; this stub owns
+    // the one session under test, so it must report it as relevant.
+    isRelevant: () => true,
   }
 }
 

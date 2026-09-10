@@ -10,6 +10,8 @@
  * @module telegram/api
  */
 
+import { ProxyAgent, fetch as undiciFetch } from 'undici'
+
 /** Telegram user object (sender of a message). */
 export interface TelegramUser {
   readonly id: number
@@ -86,6 +88,13 @@ export interface TelegramClientOptions {
   baseUrl?: string
   /** Long-polling timeout in seconds; production default is 30. */
   pollingTimeoutSec?: number
+  /**
+   * HTTP/HTTPS proxy URL (for example `http://127.0.0.1:7897`). When set, all
+   * Telegram traffic is routed through the proxy via an undici `ProxyAgent`.
+   * Only this client's requests go through the proxy — the host process's other
+   * network calls are untouched. Prefer `TELEGRAM_PROXY`/`HTTPS_PROXY` env vars.
+   */
+  proxy?: string
 }
 
 interface TelegramApiResponse<T> {
@@ -99,10 +108,35 @@ function redactToken(text: string, token: string): string {
   return text.split(token).join('***')
 }
 
-/** Strip the bot token from any thrown value before it is logged. */
+/**
+ * Flatten an error and its `cause` chain into one string (max 6 hops).
+ * Node's fetch (undici) only ever throws a generic `TypeError: fetch
+ * failed` and keeps the real reason (DNS / TCP / TLS / proxy / timeout)
+ * in `cause`; without unwrapping it the log says nothing diagnosable.
+ * Every level is redacted so the token never leaks.
+ */
 function redactedMessage(error: unknown, token: string): string {
-  const text = error instanceof Error ? error.message : String(error)
-  return redactToken(text, token)
+  const parts: string[] = []
+  let current: unknown = error
+  for (let depth = 0; current != null && depth < 6; depth++) {
+    const text = current instanceof Error ? current.message : String(current)
+    parts.push(redactToken(text, token))
+    current = current instanceof Error ? current.cause : undefined
+  }
+  return parts.join('; cause: ')
+}
+
+/**
+ * Thrown when the Bot API request fails before a response is received
+ * (DNS, TCP, TLS, proxy, timeout). Distinct from an HTTP/API error such
+ * as `401 Unauthorized`, so callers can tell "network problem" from
+ * "bad token".
+ */
+export class TelegramTransportError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'TelegramTransportError'
+  }
 }
 
 /**
@@ -113,6 +147,7 @@ export class TelegramClient implements TelegramClientLike {
   private readonly token: string
   private readonly fetchImpl: typeof fetch
   private readonly baseUrl: string
+  private readonly proxyAgent?: ProxyAgent
   /** Long-polling timeout in seconds; controls each getUpdates call. */
   readonly pollingTimeoutSec: number
 
@@ -123,9 +158,25 @@ export class TelegramClient implements TelegramClientLike {
   constructor(token: string, options: TelegramClientOptions = {}) {
     if (token === '') throw new Error('telegram client: token must not be empty')
     this.token = token
-    this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.proxyAgent = options.proxy ? new ProxyAgent(options.proxy) : undefined
+    // When a proxy is set, use undici's own `fetch` with the same-version
+    // `ProxyAgent` as the dispatcher. The Node global fetch rejects a ProxyAgent
+    // from a mismatched undici/undici-types version (`invalid onRequestStart
+    // method`), so we must not pass the dispatcher to `globalThis.fetch`.
+    if (this.proxyAgent !== undefined) {
+      const proxyFetch: typeof fetch = (input, init) =>
+        undiciFetch(input as never, { ...(init ?? {}), dispatcher: this.proxyAgent } as never) as unknown as Promise<Response>
+      this.fetchImpl = proxyFetch
+    } else {
+      this.fetchImpl = options.fetch ?? globalThis.fetch
+    }
     this.baseUrl = options.baseUrl ?? 'https://api.telegram.org'
     this.pollingTimeoutSec = options.pollingTimeoutSec ?? 30
+  }
+
+  /** Dispose the proxy connection pool, if one was created. */
+  close(): void {
+    void this.proxyAgent?.close()
   }
 
   private url(method: string): string {
@@ -142,7 +193,10 @@ export class TelegramClient implements TelegramClientLike {
         body: JSON.stringify(body),
       })
     } catch (error) {
-      throw new Error(`telegram ${method} transport error: ${redactedMessage(error, this.token)}`)
+      throw new TelegramTransportError(
+        `telegram ${method} transport error: ${redactedMessage(error, this.token)}`,
+        { cause: error },
+      )
     }
     const payload = await response.json().catch(() => null) as TelegramApiResponse<T> | null
     if (!response.ok || payload?.ok !== true) {

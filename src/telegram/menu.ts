@@ -191,8 +191,8 @@ async function doWorkspace(ctx: MenuCtx): Promise<MenuResult> {
   const current = ctx.currentCwd()
   const rows: Array<Array<[string, string]>> = []
   for (const root of roots.slice(0, 15)) {
-    const label = root === current ? `${root} (当前)` : root
-    rows.push([[`🗂 ${label}`, `workspace:${root}`]])
+    const mark = root === current ? '\u2705 ' : ''
+    rows.push([[`${mark}🗂 ${root}`, `workspace:${root}`]])
   }
   return {
     text: `📂 选择工作目录(当前 ${current}):`,
@@ -231,13 +231,19 @@ async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
   if (shown.length === 0) {
     return { text: `💬 当前工作目录下暂无会话\n(工作目录 ${currentCwd})`, keyboard: mainMenuKeyboard() }
   }
+  // Mark the session this chat is currently on (its bound session, else its own
+  // session) so re-entering the list shows the active one with a green check.
+  const boundSession = ctx.sessions.getBound(ctx.chatId, ctx.botId)
+  const ownSession = ctx.sessions.get(ctx.chatId, ctx.botId)
+  const activeSessionId = boundSession?.sessionId ?? ownSession?.sessionId
   const rows: Array<Array<[string, string]>> = shown.map(s => {
     const title = s.displayTitle ?? s.title ?? s.id.slice(0, 12)
-    return [[`${formatTime(s.updatedAt ?? 0)} · ${title}`, `session:${s.id}`]]
+    const mark = s.id === activeSessionId ? '\u2705 ' : ''
+    return [[`${mark}${formatTime(s.updatedAt ?? 0)} · ${title}`, `session:${s.id}`]]
   })
   const scopeNote = scoped.length > 0 ? `当前目录(${currentCwd})` : '全部会话'
   return {
-    text: `💬 会话(${scopeNote})\n点选以切换该会话;时间为更新时间:`,
+    text: `💬 会话(${scopeNote})\n✅ 为当前会话;点选以切换该会话;时间为更新时间:`,
     keyboard: withBack(rows),
   }
 }
@@ -255,7 +261,7 @@ async function doModel(ctx: MenuCtx): Promise<MenuResult> {
   for (const m of models.slice(0, 15)) {
     const sel = m.provider === current.provider && m.model === current.model
     rows.push([[
-      `${sel ? '✔ ' : ''}${m.model}`,
+      `${sel ? '\u2705 ' : ''}${m.model}`,
       `model:${m.provider}:${m.model}`,
     ]])
   }
@@ -280,10 +286,10 @@ async function doPreset(ctx: MenuCtx): Promise<MenuResult> {
   try { currentId = await ctx.getCurrentPresetId() } catch { currentId = undefined }
   const rows: Array<Array<[string, string]>> = presets.map(p => {
     const sel = currentId !== undefined && p.id === currentId
-    return [[`${sel ? '✔ ' : ''}${p.name}`, `preset:${p.id}`]]
+    return [[`${sel ? '\u2705 ' : ''}${p.name}`, `preset:${p.id}`]]
   })
   return {
-    text: '🧭 切换工作方式(预设);当前用 ✔ 标记;将新开会话生效:',
+    text: '🧭 切换工作方式(预设);当前用 \u2705 标记;将新开会话生效:',
     keyboard: withBack(rows),
   }
 }

@@ -38,6 +38,12 @@ export interface TelegramConfig {
     workspaceRoots?: string[];
     /** Directory for persistent state (chat↔session map, offsets). Default: <cwd>/data. */
     dataDir?: string;
+    /**
+     * HTTP/HTTPS proxy for Telegram traffic (for example `http://127.0.0.1:7897`).
+     * Falls back to `TELEGRAM_PROXY`/`HTTPS_PROXY` env vars when omitted. Only
+     * Telegram requests use it; other host network calls are untouched.
+     */
+    proxy?: string;
     /** Keep the host process alive for long-polling daemon operation. */
     keepAlive?: boolean;
     /**

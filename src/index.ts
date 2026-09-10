@@ -28,6 +28,7 @@ import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart } from './core/host.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 
 export { Config }
 export type { TelegramConfig }
@@ -59,6 +60,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
   // routing/filtering in headless profiles.
   const line = (...parts: unknown[]) => process.stderr.write(`[dsh-telegram] ${parts.join(' ')}\n`)
   const logger = { warn: (...a: unknown[]) => line('WARN', ...a), error: (...a: unknown[]) => line('ERROR', ...a) }
+  // Effective proxy for Telegram traffic: explicit config wins, else the
+  // `TELEGRAM_PROXY` / `HTTPS_PROXY` env vars already present on this host. Only
+  // Telegram requests use it; other host network calls are untouched.
+  const proxy = config.proxy ?? process.env.TELEGRAM_PROXY ?? process.env.HTTPS_PROXY
+  if (proxy) line('WARN', `Telegram 流量将经代理: ${proxy}`)
   const defaultCwd = process.cwd()
   // Persist under a stable, DSH-home-relative path so a workspace switch (and
   // the chat↔session binding) survives a DSH restart regardless of the host
@@ -140,6 +146,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
     workspaceRoots: config.workspaceRoots ?? [defaultCwd],
     defaultCwd,
     forwardLogPath: join(dataDir, 'forward.log'),
+    proxy,
     menuCtxFor: (chatId, botId) => ({
       chatId,
       botId,
@@ -289,8 +296,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
         } catch { /* continue */ }
         // 2) Direct persistence fallback: read the workspace registry file so the
         //    list never empties even when the runtime channel is unavailable.
+        //    Home resolution falls back to `~/.dsh` so the plugin still finds the
+        //    registry when the host process has NOT exported $DSH_HOME (the dsh
+        //    launcher inherits the shell env, which usually lacks it).
         try {
-          const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? ''
+          const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? join(homedir(), '.dsh')
           if (home !== '') {
             const wsFile = join(home, 'storages', 'workspace.json')
             const parsed = JSON.parse(readFileSync(wsFile, 'utf8')) as
@@ -314,8 +324,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
       listSessions: async () => {
         const out: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }> = []
         const seen = new Set<string>()
-        const push = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number } | undefined) => {
-          if (s === undefined || !s.id || seen.has(s.id)) return
+        // Skip sub-agent sessions: they are child turns, not user-facing
+        // conversations, so they should not appear in the sessions picker.
+        const isSubagent = (s: { origin?: unknown }) => s?.origin === 'subagent'
+        const push = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
+          if (s === undefined || !s.id || seen.has(s.id) || isSubagent(s)) return
           seen.add(s.id)
           out.push({
             id: s.id,
@@ -329,13 +342,13 @@ export function apply(ctx: Context, config: TelegramConfig) {
         //    updatedAt, projections: { values: { title } } } ] } (dsh-im's channel).
         try {
           const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
-            { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ sessionId?: string; cwd?: string; updatedAt?: number; projections?: { values?: { title?: string } } }> }> } | undefined
+            { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ sessionId?: string; cwd?: string; updatedAt?: number; origin?: unknown; projections?: { values?: { title?: string } } }> }> } | undefined
           if (gw?.invoke !== undefined) {
             for (const ns of ['session', 'sessions'] as const) {
               const value = await gw.invoke({ namespace: ns, method: 'list', args: {} })
               const items = value?.items ?? []
               for (const it of items) {
-                push({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt })
+                push({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt, origin: it?.origin })
               }
               if (items.length > 0) break
             }
@@ -343,9 +356,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
         } catch { /* continue */ }
         // 2) Direct persistence fallback: read the session cache files so the
         //    list never empties even when the runtime channel is unavailable.
+        //    Home resolution falls back to `~/.dsh` (same $DSH_HOME caveat as
+        //    listWorkspaces above) so the session roster is still found.
         if (out.length === 0) {
           try {
-            const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? ''
+            const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? join(homedir(), '.dsh')
             if (home !== '') {
               const sdir = join(home, 'storages', 'session_projcache', 'sessions')
               for (const name of readdirSync(sdir)) {

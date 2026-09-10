@@ -69,6 +69,13 @@ export class SessionManager {
   private readonly bindings = new Map<string, SessionBinding>()
   /** Bound chats keyed by config key (`botId:chatId` or bare `chatId`). */
   private readonly bound = new Map<string, BoundChat>()
+  /**
+   * Session ids this plugin is responsible for: every telegram agent it created
+   * / resumed, plus every session bound via config or the menu. Used as an O(1)
+   * gate by the stream listener so events from ANY OTHER session in the host
+   * are dropped silently instead of being scanned, routed, and logged.
+   */
+  private readonly relevant = new Set<string>()
 
   constructor(options: SessionManagerOptions) {
     this.factory = options.factory
@@ -93,6 +100,20 @@ export class SessionManager {
     return this.store.getChat(sessionKey(botId, chatId))?.cwd ?? this.defaultCwd
   }
 
+  /** Mark a session id as one this plugin owns or is bound to (event gate). */
+  markRelevant(sessionId: string): void {
+    this.relevant.add(sessionId)
+  }
+
+  /**
+   * O(1) gate: is this session one the plugin should process events for?
+   * Everything the host emits other than our own agents / bound chats returns
+   * false, so the stream listener can ignore foreign sessions immediately.
+   */
+  isRelevant(sessionId: string): boolean {
+    return this.relevant.has(sessionId)
+  }
+
   /** Find the binding owning a given DSH session id (for event routing). */
   bySessionId(sessionId: string): SessionBinding | undefined {
     for (const binding of this.bindings.values()) {
@@ -108,6 +129,7 @@ export class SessionManager {
   bind(chatId: number, botId: string, sessionId: string, cwd: string): void {
     const key = botId === '' ? String(chatId) : sessionKey(botId, chatId)
     this.bound.set(key, { chatId, botId, sessionId, cwd })
+    this.relevant.add(sessionId)
     this.logger?.warn(`[tg] bound chat ${key} -> ${sessionId}`)
   }
 
@@ -264,6 +286,7 @@ export class SessionManager {
     }
     const binding: SessionBinding = { chatId, botId, handle, sessionId: String(sessionId), cwd, generation }
     this.bindings.set(key, binding)
+    this.relevant.add(binding.sessionId)
     return binding
   }
 }

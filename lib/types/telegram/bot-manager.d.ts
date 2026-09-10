@@ -30,6 +30,11 @@ export interface BotManagerOptions {
     defaultCwd: string;
     /** If set, every text sent to Telegram is appended to this file. */
     forwardLogPath?: string;
+    /**
+     * HTTP/HTTPS proxy for Telegram traffic (e.g. `http://127.0.0.1:7897`).
+     * Passed to each bot's client; only Telegram requests use it.
+     */
+    proxy?: string;
     /** Build a MenuCtx for a chat/client (injected from the plugin entry). */
     menuCtxFor?: (chatId: number, botId: string) => MenuCtx;
     logger?: {

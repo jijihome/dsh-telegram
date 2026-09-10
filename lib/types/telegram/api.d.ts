@@ -77,6 +77,22 @@ export interface TelegramClientOptions {
     baseUrl?: string;
     /** Long-polling timeout in seconds; production default is 30. */
     pollingTimeoutSec?: number;
+    /**
+     * HTTP/HTTPS proxy URL (for example `http://127.0.0.1:7897`). When set, all
+     * Telegram traffic is routed through the proxy via an undici `ProxyAgent`.
+     * Only this client's requests go through the proxy — the host process's other
+     * network calls are untouched. Prefer `TELEGRAM_PROXY`/`HTTPS_PROXY` env vars.
+     */
+    proxy?: string;
+}
+/**
+ * Thrown when the Bot API request fails before a response is received
+ * (DNS, TCP, TLS, proxy, timeout). Distinct from an HTTP/API error such
+ * as `401 Unauthorized`, so callers can tell "network problem" from
+ * "bad token".
+ */
+export declare class TelegramTransportError extends Error {
+    constructor(message: string, options?: ErrorOptions);
 }
 /**
  * Minimal Bot API client. All methods throw on transport failure or a
@@ -86,6 +102,7 @@ export declare class TelegramClient implements TelegramClientLike {
     private readonly token;
     private readonly fetchImpl;
     private readonly baseUrl;
+    private readonly proxyAgent?;
     /** Long-polling timeout in seconds; controls each getUpdates call. */
     readonly pollingTimeoutSec: number;
     /**
@@ -93,6 +110,8 @@ export declare class TelegramClient implements TelegramClientLike {
      * @param options - client options.
      */
     constructor(token: string, options?: TelegramClientOptions);
+    /** Dispose the proxy connection pool, if one was created. */
+    close(): void;
     private url;
     /** POST `method` with `body`; throws on transport failure or a non-ok response. */
     private call;
