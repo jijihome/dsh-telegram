@@ -29,6 +29,7 @@ import type { CommandContext } from '../commands/index.js'
 import { handleCommand } from '../commands/index.js'
 import type { SessionManager } from '../core/session-manager.js'
 import { handleMenuCallback, mainMenuKeyboard, mainMenuText, type MenuCtx } from './menu.js'
+import { registerBotUi } from './bot-commands.js'
 
 export interface BotManagerOptions {
   /** One resolved isolation scope per configured bot. */
@@ -131,6 +132,10 @@ export class BotManager {
       // Restore the persisted offset after the token check passes.
       poll.restoreOffset(this.options.sessions.storeFor(scope.botId).getOffset(scope.botId))
       poll.start()
+      // Register the command menu + menu button (non-fatal: log-and-continue).
+      registerBotUi(client).catch(error => {
+        logger?.warn(`[tg] bot "${scope.botId}" bot UI registration failed (non-fatal): ${messageOf(error)}`)
+      })
     }).catch(error => {
       runtime.lastError = messageOf(error)
       // Transport failures ("network down", proxy, DNS…) must not be blamed
@@ -195,7 +200,10 @@ export class BotManager {
     }
     const result = await handleCommand(text, cmdCtx)
     if (result.handled) {
-      if (result.reply !== undefined) await delivery.sendFinal(chatId, result.reply)
+      if (result.reply !== undefined) {
+        if (result.keyboard !== undefined) await delivery.sendMenu(chatId, result.reply, result.keyboard)
+        else await delivery.sendFinal(chatId, result.reply)
+      }
       return
     }
     if (text.trim() === '') return

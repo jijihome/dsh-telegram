@@ -12,6 +12,8 @@ import { readdirSync } from 'node:fs'
 import type { Delivery } from '../telegram/delivery.js'
 import type { SessionManager } from '../core/session-manager.js'
 import type { StateStore } from '../core/state-store.js'
+import type { TelegramInlineKeyboard } from '../telegram/api.js'
+import { mainMenuKeyboard, mainMenuText } from '../telegram/menu.js'
 
 export interface CommandContext {
   chatId: number
@@ -29,9 +31,11 @@ export interface CommandResult {
   handled: boolean
   /** Command-specific reply text when the command is handled. */
   reply?: string
+  /** Inline keyboard to attach to the reply (sent via the menu delivery path). */
+  keyboard?: TelegramInlineKeyboard
 }
 
-const COMMANDS = '/start /help /new /clear /stop /workspace /session'.split(' ')
+const COMMANDS = '/start /menu /help /new /clear /stop /workspace /session'.split(' ')
 
 /** Detect a command at the start of a message; returns the bare command name. */
 export function isCommand(text: string): string | undefined {
@@ -49,6 +53,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   switch (name) {
     case 'start':
       return commandStart(ctx)
+    case 'menu':
+      return commandMenu()
     case 'help':
       return commandHelp(ctx)
     case 'new':
@@ -70,6 +76,16 @@ function commandStart(ctx: CommandContext): CommandResult {
   return {
     handled: true,
     reply: `🤖 dsh-telegram 已就绪。\n\n支持命令:${COMMANDS.join(' ')}\n直接发消息即可让 agent 处理。`,
+    keyboard: mainMenuKeyboard(),
+  }
+}
+
+/** /menu: main-menu text + keyboard (covered by bot-manager's direct intercept for plain `/menu`). */
+async function commandMenu(): Promise<CommandResult> {
+  return {
+    handled: true,
+    reply: await mainMenuText(),
+    keyboard: mainMenuKeyboard(),
   }
 }
 
@@ -79,6 +95,7 @@ function commandHelp(ctx: CommandContext): CommandResult {
     reply: [
       '📖 命令说明:',
       '/start — 显示欢迎信息',
+      '/menu — 打开操作菜单',
       '/help — 本帮助',
       '/new — 开启全新会话(丢弃当前上下文)',
       '/clear — 同 /new',

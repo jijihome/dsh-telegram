@@ -64,6 +64,23 @@ export interface TelegramCallbackQuery {
   readonly data?: string
 }
 
+/** A bot command advertised by `setMyCommands`. */
+export interface BotCommand {
+  readonly command: string
+  readonly description: string
+}
+
+/**
+ * Scope of a `setMyCommands` call. Only the default scope (all private chats)
+ * is modeled, which is what this plugin registers.
+ */
+export interface BotCommandScopeDefault {
+  readonly type: 'default'
+}
+
+/** Telegram `MenuButton` — this plugin only ads the command-list toggle. */
+export type MenuButton = { readonly type: 'commands' }
+
 /** Runtime seam surface tests substitute with a fake. */
 export interface TelegramClientLike {
   /** Fetch the bot identity; validates the token. */
@@ -78,6 +95,10 @@ export interface TelegramClientLike {
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>
   /** Send a chat action such as `typing`. */
   sendChatAction(chatId: number, action: string): Promise<boolean>
+  /** Register the command list shown in the bot's menu (`setMyCommands`). */
+  setMyCommands(commands: readonly BotCommand[], scope: BotCommandScopeDefault): Promise<boolean>
+  /** Set the bot's input-field menu button (`setChatMenuButton`). */
+  setChatMenuButton(button: MenuButton): Promise<boolean>
 }
 
 /** Options for {@link TelegramClient}. */
@@ -280,5 +301,24 @@ export class TelegramClient implements TelegramClientLike {
    */
   sendChatAction(chatId: number, action: string): Promise<boolean> {
     return this.call<boolean>('sendChatAction', { chat_id: chatId, action })
+  }
+
+  /**
+   * Register the command list advertised in the bot's `/` menu.
+   * @param commands - the commands to advertise.
+   * @param scope - the scope to register for (default scope covers all private chats).
+   * @returns whether the registration was accepted.
+   */
+  setMyCommands(commands: readonly BotCommand[], scope: BotCommandScopeDefault): Promise<boolean> {
+    return this.call<boolean>('setMyCommands', { commands, scope })
+  }
+
+  /**
+   * Set the bot's input-field menu button.
+   * @param button - the menu-button config (this plugin uses the command-list toggle).
+   * @returns whether the registration was accepted.
+   */
+  setChatMenuButton(button: MenuButton): Promise<boolean> {
+    return this.call<boolean>('setChatMenuButton', { menu_button: button })
   }
 }
