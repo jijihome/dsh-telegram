@@ -9,6 +9,7 @@
 import type { Delivery } from '../telegram/delivery.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { StateStore } from '../core/state-store.js';
+import type { TelegramInlineKeyboard } from '../telegram/api.js';
 export interface CommandContext {
     chatId: number;
     botId: string;
@@ -24,6 +25,8 @@ export interface CommandResult {
     handled: boolean;
     /** Command-specific reply text when the command is handled. */
     reply?: string;
+    /** Inline keyboard to attach to the reply (sent via the menu delivery path). */
+    keyboard?: TelegramInlineKeyboard;
 }
 /** Detect a command at the start of a message; returns the bare command name. */
 export declare function isCommand(text: string): string | undefined;

@@ -85,6 +85,21 @@ export interface TelegramConfig {
      * disables it. The event-based "waiting for input" notice is always on.
      */
     stallNoticeMs?: number;
+    /**
+     * When to broadcast the「DSH 已重新上线」notice after the host boots:
+     * - `always` (default): any host restart — plugin-menu requested, external or
+     *   manual — is announced (detected via the durable host-instance record and
+     *   the fresh restart marker).
+     * - `marked`: only restarts requested from the plugin menu (restart marker).
+     * - `off`: never announce.
+     */
+    restartNotice?: 'always' | 'marked' | 'off';
+    /**
+     * Skip the restart notice when the previous host-instance record is older
+     * than this many milliseconds (i.e. the host was down longer). `0` (default)
+     * means no gap limit.
+     */
+    restartNoticeMaxGapMs?: number;
     /** Base working directory roots for /workspace browsing. Defaults to process.cwd(). */
     workspaceRoots?: string[];
     /** Directory for persistent state (chat↔session map, offsets). Default: <cwd>/data. */

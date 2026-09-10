@@ -33,7 +33,7 @@ import { assertSessionOwnership, resolveBotScopes, joinDefaultDataDir, routeKey,
 import { BotManager, normalizeBots } from './telegram/bot-manager.js'
 import type { MenuCtx } from './telegram/menu.js'
 import { Delivery } from './telegram/delivery.js'
-import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker } from './core/host.js'
+import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, readHostInstance, writeHostInstance, resolveRestartNotice } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
@@ -564,22 +564,44 @@ export function apply(ctx: Context, config: TelegramConfig) {
   manager.start()
   attachDeliveries()
 
-  // Announce a plugin-triggered restart once the host is back online: a fresh
-  // restart marker (written before the previous host went down) means THIS boot
-  // came from an operator pressing "重启 DSH". Broadcast a short line to every
-  // chat that kept a session, then the marker is cleared only after a delivery
-  // succeeds — so a transient network failure retries instead of dropping the
-  // announcement forever. A manual host restart leaves no marker and stays silent.
+  // Announce a host restart once the host is back online. Detection covers ANY
+  // reboot: a fresh restart marker (written before the previous host went down)
+  // means the restart was requested from the plugin menu; otherwise a previous
+  // durable host-instance record with a different pid means the host was
+  // restarted externally (manual process kill, machine reboot, ...). Broadcast a
+  // short line to every chat that kept a session, then the marker is cleared
+  // only after a delivery succeeds — so a transient network failure retries
+  // instead of dropping the announcement forever.
+  // Idempotency: the current record is written AFTER the previous one was read,
+  // so this process never announces twice.
   let announceTimer: NodeJS.Timeout | undefined
+  const root = dataDirRoot()
+  const prevInstance = readHostInstance(root)
+  const marker = readRestartMarker(root)
+  const noticeKind = resolveRestartNotice({
+    prev: prevInstance,
+    marker,
+    mode: config.restartNotice ?? 'always',
+    maxGapMs: config.restartNoticeMaxGapMs ?? 0,
+  })
+  // Overwrite with this process's record BEFORE any broadcast: even if delivery
+  // retries run for a while, a second activation sees the new pid and stays silent.
+  writeHostInstance(root)
   const announceRestart = async (attempt = 0): Promise<void> => {
-    const marker = readRestartMarker(dataDirRoot())
-    if (marker === undefined) {
-      logger.warn('未检测到重启标记(手动启动或标记已过期),跳过「已上线」广播')
+    if (noticeKind === 'none') {
+      logger.warn('未检测到需要广播的重启(首次启动/同 PID/已关闭),跳过「已上线」广播')
       return
     }
     if (attempt === 0) {
-      logger.warn(`检测到插件触发的重启(源于 PID ${marker.hostPid},${new Date(marker.at).toISOString()}),广播「已上线」`)
+      if (marker !== undefined) {
+        logger.warn(`检测到插件触发的重启(源于 PID ${marker.hostPid},${new Date(marker.at).toISOString()}),广播「已上线」`)
+      } else {
+        logger.warn(`检测到外部/手动宿主重启(上一实例 PID ${prevInstance?.pid}),广播「已上线」`)
+      }
     }
+    const message = noticeKind === 'requested'
+      ? '✅ DSH 已重新上线,会话已恢复。'
+      : '✅ DSH 已重新上线(检测到宿主重启)'
     let anySent = false
     for (const scope of scopes) {
       const delivery = deliveries.get(scope.botId)
@@ -592,7 +614,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
         const chatId = Number(colon >= 0 ? key.slice(colon + 1) : key)
         if (!Number.isFinite(chatId)) continue
         try {
-          await delivery.sendFinal(chatId, '✅ DSH 已重新上线,会话已恢复。')
+          await delivery.sendFinal(chatId, message)
           anySent = true
         } catch (error) {
           logger.warn(`[tg] 「已上线」广播失败 chat=${chatId}(第 ${attempt + 1} 次): ${String(error)}`)

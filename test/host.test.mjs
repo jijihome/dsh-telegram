@@ -21,6 +21,10 @@ import {
   readRestartMarker,
   clearRestartMarker,
   restartMarkerPath,
+  readHostInstance,
+  writeHostInstance,
+  hostInstancePath,
+  resolveRestartNotice,
 } from '../lib/core/host.js'
 
 /** Temp dir per test. */
@@ -76,4 +80,57 @@ test('clearRestartMarker is a safe no-op when nothing is present', () => {
   const dir = tmp()
   clearRestartMarker(dir)
   assert.ok(true, 'clear on missing marker does not throw')
+})
+
+// --- host-instance record + resolveRestartNotice (ANY-restart detection) ---
+
+test('host-instance record: write then read round-trips; missing/corrupt yields undefined', () => {
+  const dir = tmp()
+  assert.equal(readHostInstance(dir), undefined, 'missing record yields undefined')
+  writeHostInstance(dir)
+  const rec = readHostInstance(dir)
+  assert.ok(rec !== undefined)
+  assert.equal(rec.pid, process.pid)
+  assert.equal(typeof rec.startedAt, 'number')
+  assert.equal(typeof rec.lastSeenAt, 'number')
+  writeFileSync(hostInstancePath(dir), 'broken{{', 'utf8')
+  assert.equal(readHostInstance(dir), undefined, 'corrupt record yields undefined')
+})
+
+test('first ever start (no prev record, no marker) does not announce', () => {
+  assert.equal(resolveRestartNotice({}), 'none')
+})
+
+test('second start with a previous record (pid differs) announces as external', () => {
+  assert.equal(resolveRestartNotice({ prev: { pid: 111, startedAt: 1, lastSeenAt: 2 }, pid: 222 }), 'external')
+})
+
+test('fresh restart marker announces as requested (plugin-menu wording)', () => {
+  assert.equal(resolveRestartNotice({ prev: { pid: 111, startedAt: 1, lastSeenAt: 2 }, marker: { at: 5, hostPid: 111 }, pid: 222 }), 'requested')
+  // Marker wins even without a previous record.
+  assert.equal(resolveRestartNotice({ marker: { at: 5, hostPid: 1 }, pid: 222 }), 'requested')
+})
+
+test('same pid (re-entry in one process) does not announce', () => {
+  const pid = process.pid
+  assert.equal(resolveRestartNotice({ prev: { pid, startedAt: 1, lastSeenAt: 2 } }), 'none')
+})
+
+test('restartNotice off suppresses even a requested restart', () => {
+  assert.equal(resolveRestartNotice({ marker: { at: 5, hostPid: 1 }, mode: 'off' }), 'none')
+  assert.equal(resolveRestartNotice({ prev: { pid: 111, startedAt: 1, lastSeenAt: 2 }, pid: 222, mode: 'off' }), 'none')
+})
+
+test('marked mode: only plugin-menu restarts announce', () => {
+  const prev = { pid: 111, startedAt: 1, lastSeenAt: 2 }
+  assert.equal(resolveRestartNotice({ prev, pid: 222, mode: 'marked' }), 'none')
+  assert.equal(resolveRestartNotice({ marker: { at: 5, hostPid: 1 }, mode: 'marked' }), 'requested')
+})
+
+test('restartNoticeMaxGapMs: previous record older than the gap suppresses the notice', () => {
+  const prev = { pid: 111, startedAt: 1000, lastSeenAt: 2000 }
+  const now = 2000 + 61_000
+  assert.equal(resolveRestartNotice({ prev, pid: 222, maxGapMs: 60_000, now }), 'none')
+  // Within the gap (falls back to startedAt when lastSeenAt is missing) announces.
+  assert.equal(resolveRestartNotice({ prev: { pid: 111, startedAt: 1000 }, pid: 222, maxGapMs: 60_000, now: 1000 + 60_000 }), 'external')
 })

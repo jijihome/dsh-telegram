@@ -92,6 +92,94 @@ export function clearRestartMarker(markerDir: string): void {
   try { rmSync(restartMarkerPath(markerDir), { force: true }) } catch { /* best effort */ }
 }
 
+/**
+ * Durable per-boot host record. Written by every host activation under the
+ * data root; the next activation reads the previous record to detect that the
+ * host process restarted (pid changed), so an external/manual restart — which
+ * leaves no restart marker — is still announced.
+ */
+export interface HostInstanceRecord {
+  /** PID of the host process that wrote the record. */
+  pid: number
+  /** Unix-epoch-ms of that host's startup (record creation). */
+  startedAt: number
+  /** Unix-epoch-ms of the last write by that host. */
+  lastSeenAt: number
+}
+
+/** Path of the durable host-instance record. */
+export function hostInstancePath(dir: string): string {
+  return join(dir, 'host-instance.json')
+}
+
+/** Read the previous host-instance record; undefined when absent/corrupt. */
+export function readHostInstance(dir: string): HostInstanceRecord | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(hostInstancePath(dir), 'utf8')) as HostInstanceRecord
+    if (typeof parsed?.pid !== 'number' || typeof parsed?.startedAt !== 'number') return undefined
+    return parsed
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Write this host's instance record. Called once per activation AFTER the
+ * previous record was read, so restart detection is idempotent: the next boot
+ * sees this process's pid and does not announce again.
+ */
+export function writeHostInstance(dir: string, at = Date.now()): void {
+  try {
+    mkdirSync(dir, { recursive: true })
+    const record: HostInstanceRecord = { pid: process.pid, startedAt: at, lastSeenAt: at }
+    writeFileSync(hostInstancePath(dir), JSON.stringify(record), 'utf8')
+  } catch {
+    // A failed record write must never break activation.
+  }
+}
+
+/** What the startup hook should broadcast after this boot. */
+export type RestartNoticeKind = 'requested' | 'external' | 'none'
+
+/** Options for {@link resolveRestartNotice}. */
+export interface ResolveRestartNoticeOptions {
+  /** Previous host-instance record, if one was on disk. */
+  prev?: HostInstanceRecord
+  /** Fresh restart marker, if one was found. */
+  marker?: RestartMarker
+  /** Current process pid. Defaults to `process.pid`. */
+  pid?: number
+  /** Notice policy from config. Default `always`. */
+  mode?: 'always' | 'marked' | 'off'
+  /** Skip the notice when the previous record is older than this. 0 = no limit. */
+  maxGapMs?: number
+  /** Test seam: override the clock used for the gap check. */
+  now?: number
+}
+
+/**
+ * Decide the restart-notice kind for this boot. A fresh marker means the
+ * restart was requested from the plugin menu (`requested`); otherwise a
+ * previous record whose pid differs from this process means an external or
+ * manual restart (`external`); anything else (`none`) stays silent.
+ */
+export function resolveRestartNotice(options: ResolveRestartNoticeOptions = {}): RestartNoticeKind {
+  const mode = options.mode ?? 'always'
+  if (mode === 'off') return 'none'
+  if (options.marker !== undefined) return 'requested'
+  const prev = options.prev
+  if (prev === undefined) return 'none'
+  if ((options.pid ?? process.pid) === prev.pid) return 'none'
+  const maxGapMs = options.maxGapMs ?? 0
+  if (maxGapMs > 0) {
+    const lastSeen = typeof prev.lastSeenAt === 'number' ? prev.lastSeenAt : prev.startedAt
+    const now = options.now ?? Date.now()
+    if (now - lastSeen > maxGapMs) return 'none'
+  }
+  if (mode === 'marked') return 'none'
+  return 'external'
+}
+
 /** Return a human-readable snapshot of the host process for the ops panel. */
 export function getHostInfo(): string {
   const text = [
