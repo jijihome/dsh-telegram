@@ -29,11 +29,11 @@ import { DshAgentFactory } from './harness/agent-factory.js'
 import { StreamListener } from './harness/stream-listener.js'
 import { SessionManager, preferSession } from './core/session-manager.js'
 import { StateStore, migrateLegacyState, botDataDir, type ChatState } from './core/state-store.js'
-import { assertSessionOwnership, resolveBotScopes, routeKey, type BotScope } from './core/bot-scope.js'
+import { assertSessionOwnership, resolveBotScopes, joinDefaultDataDir, routeKey, type BotScope } from './core/bot-scope.js'
 import { BotManager, normalizeBots } from './telegram/bot-manager.js'
 import type { MenuCtx } from './telegram/menu.js'
 import { Delivery } from './telegram/delivery.js'
-import { getHostInfo, scheduleRestart, readRestartMarker } from './core/host.js'
+import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
@@ -50,7 +50,7 @@ export { StateStore, migrateLegacyState, stateFilePath, botDataDir } from './cor
 export { resolveBotScopes, assertSessionOwnership, routeKey } from './core/bot-scope.js'
 export type { BotScope } from './core/bot-scope.js'
 export { readHostDefaultModel, parseAgentDefaultModel, resolveDshHome } from './core/host-default-model.js'
-export { getHostInfo, scheduleRestart } from './core/host.js'
+export { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker } from './core/host.js'
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js'
 export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js'
 export { markdownToHtml, splitMessage, escapeHtml } from './core/format.js'
@@ -67,10 +67,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
   const defaultCwd = process.cwd()
   // DSH home: holds settings.yaml (host default model) and the profile stores.
   const dshHome = resolveDshHome(join(homedir(), '.dsh'))
-  // Cross-bot shared data root: holds the one-shot restart marker (and defaults
-  // per-bot subdirs live under it). Single source so the restart write and the
-  // boot-time "已上线" broadcast always agree on where the marker lives.
-  const dataDirRoot = () => config.dataDir ?? join(defaultCwd, 'data')
+  // Cross-bot shared data root: holds the one-shot restart marker. Must match
+  // bot-scope's resolution (`config.dataDir` or `<DSH_HOME>/plugin-data/dsh-telegram`)
+  // exactly, or the restart write and the boot-time "已上线" broadcast would look
+  // in different directories and the marker could never be found.
+  const dataDirRoot = () => config.dataDir ?? joinDefaultDataDir(defaultCwd)
 
   // Direct-to-stderr logger so daemon diagnostics survive any Cordis log
   // routing/filtering in headless profiles.
@@ -544,15 +545,20 @@ export function apply(ctx: Context, config: TelegramConfig) {
   // Announce a plugin-triggered restart once the host is back online: a fresh
   // restart marker (written before the previous host went down) means THIS boot
   // came from an operator pressing "重启 DSH". Broadcast a short line to every
-  // chat that kept a session, then the marker is consumed. A manual host restart
-  // leaves no marker and stays silent.
-  const announceRestart = () => {
+  // chat that kept a session, then the marker is cleared only after a delivery
+  // succeeds — so a transient network failure retries instead of dropping the
+  // announcement forever. A manual host restart leaves no marker and stays silent.
+  let announceTimer: NodeJS.Timeout | undefined
+  const announceRestart = async (attempt = 0): Promise<void> => {
     const marker = readRestartMarker(dataDirRoot())
     if (marker === undefined) {
       logger.warn('未检测到重启标记(手动启动或标记已过期),跳过「已上线」广播')
       return
     }
-    logger.warn(`检测到插件触发的重启(源于 PID ${marker.hostPid},${new Date(marker.at).toISOString()}),广播「已上线」`)
+    if (attempt === 0) {
+      logger.warn(`检测到插件触发的重启(源于 PID ${marker.hostPid},${new Date(marker.at).toISOString()}),广播「已上线」`)
+    }
+    let anySent = false
     for (const scope of scopes) {
       const delivery = deliveries.get(scope.botId)
       const store = stores.get(scope.botId)
@@ -563,13 +569,30 @@ export function apply(ctx: Context, config: TelegramConfig) {
         const colon = key.lastIndexOf(':')
         const chatId = Number(colon >= 0 ? key.slice(colon + 1) : key)
         if (!Number.isFinite(chatId)) continue
-        void delivery.sendFinal(chatId, '✅ DSH 已重新上线,会话已恢复。').catch((error: unknown) => {
-          logger.warn(`[tg] 「已上线」广播失败 chat=${chatId}: ${String(error)}`)
-        })
+        try {
+          await delivery.sendFinal(chatId, '✅ DSH 已重新上线,会话已恢复。')
+          anySent = true
+        } catch (error) {
+          logger.warn(`[tg] 「已上线」广播失败 chat=${chatId}(第 ${attempt + 1} 次): ${String(error)}`)
+        }
       }
     }
+    if (anySent) {
+      clearRestartMarker(dataDirRoot())
+      return
+    }
+    // Nothing delivered yet: retry a few times so a Telegram/proxy hiccup right
+    // after a restart does not lose the notice. Give up and clear after the cap.
+    const maxAttempts = 5
+    if (attempt + 1 >= maxAttempts) {
+      clearRestartMarker(dataDirRoot())
+      logger.warn(`「已上线」广播重试 ${maxAttempts} 次仍无一次投递成功,已放弃并清除标记`)
+      return
+    }
+    const delayMs = 1500 * (attempt + 1)
+    announceTimer = setTimeout(() => { void announceRestart(attempt + 1) }, delayMs)
   }
-  queueMicrotask(announceRestart)
+  void announceRestart()
 
   // Persist offsets periodically (debounced) and on unload — each bot into its
   // own file through its own store.
@@ -595,6 +618,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
     return () => {
       clearInterval(flushTimer)
       if (keepAliveTimer !== undefined) clearInterval(keepAliveTimer)
+      if (announceTimer !== undefined) clearTimeout(announceTimer)
       listener.stop()
       void manager.stop().finally(() => {
         for (const scope of scopes) stores.get(scope.botId)?.flush()

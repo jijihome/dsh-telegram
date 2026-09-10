@@ -47,11 +47,21 @@ export declare function restartMarkerPath(markerDir: string): string;
  */
 export declare function writeRestartMarker(markerDir: string, at?: number): void;
 /**
- * Read and clear the one-shot restart marker. Returns the marker only when it
- * was written recently (within `freshMs`, default 60s) — i.e. this host came
- * back up because of a plugin-triggered restart, not a manual one.
+ * Peek at the one-shot restart marker WITHOUT deleting it. Returns the marker
+ * only when it was written recently (within `freshMs`, default 60s) — i.e. this
+ * host came back up because of a plugin-triggered restart, not a manual one.
+ *
+ * Deliberately does not delete: the caller broadcasts "已上线" over Telegram and
+ * must retry on transient delivery failure, then clear the marker only after a
+ * confirmed send (see {@link clearRestartMarker}). Deleting eagerly would drop
+ * the announcement when the first send hits a network hiccup.
  */
 export declare function readRestartMarker(markerDir: string, freshMs?: number): RestartMarker | undefined;
+/**
+ * Remove the restart marker after the "已上线" announcement was delivered, so a
+ * later manual boot never re-fires. Safe to call repeatedly.
+ */
+export declare function clearRestartMarker(markerDir: string): void;
 /** Return a human-readable snapshot of the host process for the ops panel. */
 export declare function getHostInfo(): string;
 /**
