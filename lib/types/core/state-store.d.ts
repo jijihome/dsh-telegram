@@ -72,7 +72,15 @@ export declare class StateStore {
     getChat(key: string): ChatState | undefined;
     /** All persisted bindings. */
     allChats(): Record<string, ChatState>;
-    /** Remember a bot's last acknowledged update offset. */
+    /**
+     * Remember a bot's last acknowledged update offset.
+     *
+     * An `undefined` offset is IGNORED rather than stored: the periodic flush runs
+     * from plugin start, while the bot's poll cursor is still unset until its first
+     * `getUpdates` returns, and writing that `undefined` would erase the restored
+     * cursor — Telegram would then re-deliver already-answered updates after the
+     * next restart.
+     */
     setOffset(botId: string, offset: number | undefined): void;
     /** Last acknowledged offset for a bot; undefined = resume from newest. */
     getOffset(botId: string): number | undefined;

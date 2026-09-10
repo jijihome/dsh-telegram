@@ -503,7 +503,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
   const flushTimer = setInterval(() => {
     for (const [id, runtime] of manager.all) {
       try {
-        stores.get(id)?.setOffset(id, runtime.poll.currentOffset)
+        // Only persist a cursor that exists: before the bot's first successful
+        // getUpdates the cursor is undefined, and writing it would erase the
+        // restored offset (Telegram would re-deliver old updates next restart).
+        const offset = runtime.poll.currentOffset
+        if (offset !== undefined) stores.get(id)?.setOffset(id, offset)
         stores.get(id)?.flush()
       } catch (error) {
         logger.warn(`offset flush failed for ${id}: ${String(error)}`)

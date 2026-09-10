@@ -137,11 +137,20 @@ export class StateStore {
     return { ...this.chatStates }
   }
 
-  /** Remember a bot's last acknowledged update offset. */
+  /**
+   * Remember a bot's last acknowledged update offset.
+   *
+   * An `undefined` offset is IGNORED rather than stored: the periodic flush runs
+   * from plugin start, while the bot's poll cursor is still unset until its first
+   * `getUpdates` returns, and writing that `undefined` would erase the restored
+   * cursor — Telegram would then re-deliver already-answered updates after the
+   * next restart.
+   */
   setOffset(botId: string, offset: number | undefined): void {
     if (this.botId !== undefined && botId !== this.botId) {
       throw new Error(`dsh-telegram: offset 越界 — store(${this.botId}) 收到 bot "${botId}" 的 offset`)
     }
+    if (offset === undefined) return
     this.offsets[botId] = offset
     this.dirty = true
   }

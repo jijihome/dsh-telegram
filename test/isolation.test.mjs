@@ -721,3 +721,19 @@ test('the environment proxy is the last-resort Telegram proxy', () => {
   const none = resolveBotScopes([{ id: 'e', token: 't5' }], { dataDir: 'E:/d' }, 'E:/ws')
   assert.equal(none[0].proxy, undefined, 'no proxy anywhere -> undefined (plugin logs a direct-connect warning)')
 })
+
+// ------------------------------------------------------------ poll cursor
+
+test('an undefined poll offset never erases the restored cursor', () => {
+  // The periodic flush runs from plugin start, while a bot's cursor is still
+  // unset; storing that undefined would make Telegram re-deliver already-answered
+  // updates after the next restart.
+  const env = makeEnv()
+  const store = env.stores.get('bot-a')
+  store.setOffset('bot-a', 4242)
+  store.setOffset('bot-a', undefined)
+  assert.equal(store.getOffset('bot-a'), 4242, 'an undefined write is ignored, not stored')
+  store.flush()
+  const file = JSON.parse(readFileSync(stateFilePath(env.dir, 'bot-a'), 'utf8'))
+  assert.equal(file.offsets['bot-a'], 4242, 'the cursor survives a restart')
+})
