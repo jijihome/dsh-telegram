@@ -4,13 +4,23 @@
  * network outage, API error) logs and stops only itself; the others keep
  * polling. On poll errors the LongPoll backoff reconnects automatically.
  *
+ * Multi-bot isolation: every decision (authorization, proxy, forward log path,
+ * workspace roots, persistence file, offset cursor) is read from the bot's own
+ * `BotScope`, never from shared plugin state. The update handler receives its
+ * runtime explicitly, so no lookup can ever resolve to another bot's client
+ * (the previous `runtimes.get(bot.id)` path could reply through the wrong token
+ * when two bots shared an id).
+ *
  * Structure follows @loserfox/telegram's bridge/apply split (BSD-3-Clause),
- * generalized to N bots and wired to the session manager + commands.
+ * generalized to N isolated bots and wired to the session manager + commands.
  *
  * @module telegram/bot-manager
  */
 
+import { join } from 'node:path'
 import type { BotConfig } from '../config.js'
+import type { BotScope } from '../core/bot-scope.js'
+import { botDataDir } from '../core/state-store.js'
 import { TelegramClient, TelegramTransportError } from './api.js'
 import { LongPoll } from './long-poll.js'
 import { Delivery } from './delivery.js'
@@ -18,35 +28,22 @@ import type { TelegramUpdate, TelegramCallbackQuery } from './api.js'
 import type { CommandContext } from '../commands/index.js'
 import { handleCommand } from '../commands/index.js'
 import type { SessionManager } from '../core/session-manager.js'
-import type { StateStore } from '../core/state-store.js'
 import { handleMenuCallback, mainMenuKeyboard, mainMenuText, type MenuCtx } from './menu.js'
 
 export interface BotManagerOptions {
-  bots: BotConfig[]
-  /** Telegram user ids allowed to talk; empty = none unless allowAllUsers. */
-  allowedUserIds: number[]
-  /** Allow any user (dev only). */
-  allowAllUsers: boolean
+  /** One resolved isolation scope per configured bot. */
+  scopes: readonly BotScope[]
   sessions: SessionManager
-  store: StateStore
   pollingTimeoutSec: number
   maxMessageLength: number
-  workspaceRoots: string[]
   defaultCwd: string
-  /** If set, every text sent to Telegram is appended to this file. */
-  forwardLogPath?: string
-  /**
-   * HTTP/HTTPS proxy for Telegram traffic (e.g. `http://127.0.0.1:7897`).
-   * Passed to each bot's client; only Telegram requests use it.
-   */
-  proxy?: string
-  /** Build a MenuCtx for a chat/client (injected from the plugin entry). */
+  /** Build a MenuCtx for one (chat, bot) pair (injected from the plugin entry). */
   menuCtxFor?: (chatId: number, botId: string) => MenuCtx
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
 export interface BotRuntime {
-  bot: BotConfig
+  scope: BotScope
   client: TelegramClient
   delivery: Delivery
   poll: LongPoll
@@ -73,7 +70,7 @@ export class BotManager {
     this.options = options
   }
 
-  /** Ready-to-use runtimes (only successfully started bots). */
+  /** Ready-to-use runtimes (only successfully started bots), keyed by bot id. */
   get all(): Map<string, BotRuntime> {
     return this.runtimes
   }
@@ -82,12 +79,12 @@ export class BotManager {
   start(): void {
     if (this.started) return
     this.started = true
-    for (const bot of this.options.bots) {
+    for (const scope of this.options.scopes) {
       try {
-        const runtime = this.launch(bot)
-        this.runtimes.set(bot.id, runtime)
+        const runtime = this.launch(scope)
+        this.runtimes.set(scope.botId, runtime)
       } catch (error) {
-        this.options.logger?.error(`[tg] bot "${bot.id}" failed to start: ${messageOf(error)}`)
+        this.options.logger?.error(`[tg] bot "${scope.botId}" failed to start: ${messageOf(error)}`)
       }
     }
   }
@@ -103,31 +100,36 @@ export class BotManager {
   }
 
   /** Launch one bot: client + delivery + poll, verify token async, wire updates. */
-  private launch(bot: BotConfig): BotRuntime {
+  private launch(scope: BotScope): BotRuntime {
     const logger = this.options.logger
-    const client = new TelegramClient(bot.token, {
+    const client = new TelegramClient(scope.token, {
       pollingTimeoutSec: this.options.pollingTimeoutSec,
-      ...(this.options.proxy !== undefined ? { proxy: this.options.proxy } : {}),
+      ...(scope.proxy !== undefined ? { proxy: scope.proxy } : {}),
     })
+    // Each bot logs forward traffic into its own directory, so one bot's
+    // conversation can never be read out of another bot's log file.
     const delivery = new Delivery({
       client,
       maxMessageLength: this.options.maxMessageLength,
       logger,
-      ...(this.options.forwardLogPath !== undefined ? { forwardLogPath: this.options.forwardLogPath } : {}),
+      forwardLogPath: join(botDataDir(scope.dataDir, scope.botId), 'forward.log'),
     })
+    // The runtime is captured by the update handler, so a bot can only ever act
+    // through its own client/delivery (no id-keyed reverse lookup).
+    const runtime: BotRuntime = { scope, client, delivery, poll: undefined as unknown as LongPoll }
     const poll = new LongPoll({
       client,
-      onUpdate: update => void this.handleUpdate(bot, update),
+      onUpdate: update => void this.handleUpdate(runtime, update),
       onError: (error, attempt, delayMs) => {
-        logger?.warn(`[tg] bot "${bot.id}" poll error #${attempt} (retry ${delayMs}ms): ${messageOf(error)}`)
+        logger?.warn(`[tg] bot "${scope.botId}" poll error #${attempt} (retry ${delayMs}ms): ${messageOf(error)}`)
       },
     })
+    runtime.poll = poll
 
-    const runtime: BotRuntime = { bot, client, delivery, poll }
     void client.getMe().then(me => {
-      logger?.warn(`[tg] bot "${bot.id}" online: @${me.username ?? me.id}`)
+      logger?.warn(`[tg] bot "${scope.botId}" online: @${me.username ?? me.id}`)
       // Restore the persisted offset after the token check passes.
-      poll.restoreOffset(this.options.store.getOffset(bot.id))
+      poll.restoreOffset(this.options.sessions.storeFor(scope.botId).getOffset(scope.botId))
       poll.start()
     }).catch(error => {
       runtime.lastError = messageOf(error)
@@ -135,41 +137,38 @@ export class BotManager {
       // on the token; only an HTTP/API error such as 401 makes the token
       // itself invalid.
       const label = error instanceof TelegramTransportError ? 'startup network check failed' : 'token invalid'
-      logger?.error(`[tg] bot "${bot.id}" ${label}: ${runtime.lastError}`)
+      logger?.error(`[tg] bot "${scope.botId}" ${label}: ${runtime.lastError}`)
     })
     return runtime
   }
 
   /** Route one Telegram update: authorize, then command or agent follow-up. */
-  private async handleUpdate(bot: BotConfig, update: TelegramUpdate): Promise<void> {
-    const api = this.runtimes.get(bot.id)?.client
+  private async handleUpdate(runtime: BotRuntime, update: TelegramUpdate): Promise<void> {
+    const { scope, delivery } = runtime
     // Menu button press → run the menu action and show the result.
     const callbackQuery = update.callback_query
     if (callbackQuery !== undefined) {
-      await this.handleCallback(bot, callbackQuery)
+      await this.handleCallback(runtime, callbackQuery)
       return
     }
     const message = update.message
     if (message === undefined) return
     const chatId = message.chat.id
 
-    // Authorization.
-    if (!this.isAllowed(message.from?.id ?? 0)) {
-      await this.runtimes.get(bot.id)?.delivery.sendFinal(chatId, '⛔ 未授权的用户')
+    // Authorization (this bot's own whitelist only).
+    if (!this.isAllowed(scope, message.from?.id ?? 0)) {
+      await delivery.sendFinal(chatId, '⛔ 未授权的用户')
       return
     }
 
-    const runtime = this.runtimes.get(bot.id)
-    if (runtime === undefined) return
-    const { delivery, bot: cfg } = runtime
     const text = message.text ?? ''
 
     // /menu shows the inline keyboard menu with the status summary on top.
     if (/^\/(menu)$/.test(text.trim())) {
-      const menuCtx = this.options.menuCtxFor?.(chatId, cfg.id)
+      const menuCtx = this.options.menuCtxFor?.(chatId, scope.botId)
       if (menuCtx !== undefined) {
         menuCtx.userId = message.from?.id ?? 0
-        menuCtx.canOperate = this.isAllowed(menuCtx.userId)
+        menuCtx.canOperate = this.isAllowed(scope, menuCtx.userId)
         await delivery.sendMenu(chatId, await mainMenuText(menuCtx), mainMenuKeyboard())
       } else {
         await delivery.sendMenu(chatId, await mainMenuText(), mainMenuKeyboard())
@@ -180,12 +179,12 @@ export class BotManager {
     // Commands are handled locally.
     const cmdCtx: CommandContext = {
       chatId,
-      botId: cfg.id,
+      botId: scope.botId,
       userId: message.from?.id ?? 0,
       delivery,
       sessions: this.options.sessions,
-      store: this.options.store,
-      workspaceRoots: this.options.workspaceRoots,
+      store: this.options.sessions.storeFor(scope.botId),
+      workspaceRoots: scope.workspaceRoots,
       defaultCwd: this.options.defaultCwd,
     }
     const result = await handleCommand(text, cmdCtx)
@@ -198,24 +197,19 @@ export class BotManager {
     // Otherwise: if the chat is bound to an existing session, follow up on it;
     // else bind the chat to its own agent and follow up.
     try {
-      const bound = this.options.sessions.getBound(chatId, cfg.id)
+      const bound = this.options.sessions.getBound(chatId, scope.botId)
       if (bound !== undefined) {
-        this.options.logger?.warn(`[tg] bound msg chat=${chatId}(${cfg.id}) -> ${bound.sessionId}`)
+        this.options.logger?.warn(`[tg] bound msg chat=${chatId}(${scope.botId}) -> ${bound.sessionId}`)
         await delivery.typing(chatId)
-        void this.options.sessions.boundFollowup(chatId, cfg.id, text, error => {
+        void this.options.sessions.boundFollowup(chatId, scope.botId, text, error => {
           void delivery.sendFinal(chatId, `❌ 消息处理失败:${messageOf(error)}`)
         })
         return
       }
-      this.options.logger?.warn(`[tg] unbound msg chat=${chatId}(${cfg.id}); creating own session`)
-      const binding = await this.options.sessions.getOrCreate(chatId, cfg.id)
-      const persisted = this.options.store.getChat(`${cfg.id}:${chatId}`)
-      if (binding.cwd !== (persisted?.cwd ?? this.options.defaultCwd)) {
-        // A /workspace switch was recorded for a later /new; nothing to do
-        // for the live binding — keep on the current cwd.
-      }
+      this.options.logger?.warn(`[tg] unbound msg chat=${chatId}(${scope.botId}); creating own session`)
+      await this.options.sessions.getOrCreate(chatId, scope.botId)
       await delivery.typing(chatId)
-      this.options.sessions.followup(chatId, cfg.id, text, error => {
+      this.options.sessions.followup(chatId, scope.botId, text, error => {
         void delivery.sendFinal(chatId, `❌ 消息处理失败:${messageOf(error)}`)
       })
     } catch (error) {
@@ -223,17 +217,15 @@ export class BotManager {
     }
   }
 
-  /** Whitelist or allow-all check. */
-  private isAllowed(userId: number): boolean {
-    if (this.options.allowAllUsers) return true
-    return this.options.allowedUserIds.includes(userId)
+  /** Whitelist or allow-all check for one bot. */
+  private isAllowed(scope: BotScope, userId: number): boolean {
+    if (scope.allowAllUsers) return true
+    return scope.allowedUserIds.includes(userId)
   }
 
   /** Handle a callback_query (menu button press). */
-  private async handleCallback(bot: BotConfig, callbackQuery: TelegramCallbackQuery): Promise<void> {
-    const runtime = this.runtimes.get(bot.id)
-    if (runtime === undefined) return
-    const { delivery, bot: cfg, client } = runtime
+  private async handleCallback(runtime: BotRuntime, callbackQuery: TelegramCallbackQuery): Promise<void> {
+    const { scope, delivery, client } = runtime
     const chatId = callbackQuery.message?.chat?.id
     if (chatId === undefined) return
     // Acknowledge the press (stops Telegram's loading spinner).
@@ -243,7 +235,7 @@ export class BotManager {
       this.options.logger?.warn(`[tg] answerCallbackQuery failed: ${messageOf(error)}`)
     }
     const data = callbackQuery.data ?? ''
-    const menuCtx = this.options.menuCtxFor?.(chatId, cfg.id)
+    const menuCtx = this.options.menuCtxFor?.(chatId, scope.botId)
     if (menuCtx === undefined) {
       await delivery.sendFinal(chatId, '菜单不可用')
       return
@@ -252,7 +244,7 @@ export class BotManager {
     // inbound messages so the high-risk actions (restart dsh) cannot be pressed
     // by a non-whitelisted user.
     menuCtx.userId = callbackQuery.from?.id ?? 0
-    menuCtx.canOperate = this.isAllowed(menuCtx.userId)
+    menuCtx.canOperate = this.isAllowed(scope, menuCtx.userId)
     try {
       const result = await handleMenuCallback(data, menuCtx)
       await delivery.sendMenu(chatId, result.text, result.keyboard)

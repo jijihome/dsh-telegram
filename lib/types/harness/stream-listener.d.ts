@@ -43,11 +43,12 @@ export declare class StreamListener {
     stop(): void;
     private handle;
     /**
-     * Resolve a DSH session id to every bound (chatId, botId) route. Consults the
-     * plugin's own per-chat bindings first, then config session bindings. A bare
-     * chatId binding (botId '') applies only when there is a single configured
-     * bot; in multi-bot mode the config must use `botId:chatId` keys so outbound
-     * reaches the right bot(s).
+     * Resolve a DSH session id to every bound (chatId, botId) route. Under strict
+     * multi-bot isolation this is exactly one route: the plugin's own live binding
+     * when the chat owns the session, otherwise its single config binding. A bare
+     * chatId binding (botId '') can only exist in a single-bot deployment, where
+     * it resolves to that one bot. More than one route here means every involved
+     * bot explicitly opted into `allowSharedSessions`, and is logged as such.
      */
     private resolveRoutes;
     /** End the live segment and report an agent-level failure to the bot. */

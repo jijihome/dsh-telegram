@@ -4,38 +4,33 @@
  * network outage, API error) logs and stops only itself; the others keep
  * polling. On poll errors the LongPoll backoff reconnects automatically.
  *
+ * Multi-bot isolation: every decision (authorization, proxy, forward log path,
+ * workspace roots, persistence file, offset cursor) is read from the bot's own
+ * `BotScope`, never from shared plugin state. The update handler receives its
+ * runtime explicitly, so no lookup can ever resolve to another bot's client
+ * (the previous `runtimes.get(bot.id)` path could reply through the wrong token
+ * when two bots shared an id).
+ *
  * Structure follows @loserfox/telegram's bridge/apply split (BSD-3-Clause),
- * generalized to N bots and wired to the session manager + commands.
+ * generalized to N isolated bots and wired to the session manager + commands.
  *
  * @module telegram/bot-manager
  */
 import type { BotConfig } from '../config.js';
+import type { BotScope } from '../core/bot-scope.js';
 import { TelegramClient } from './api.js';
 import { LongPoll } from './long-poll.js';
 import { Delivery } from './delivery.js';
 import type { SessionManager } from '../core/session-manager.js';
-import type { StateStore } from '../core/state-store.js';
 import { type MenuCtx } from './menu.js';
 export interface BotManagerOptions {
-    bots: BotConfig[];
-    /** Telegram user ids allowed to talk; empty = none unless allowAllUsers. */
-    allowedUserIds: number[];
-    /** Allow any user (dev only). */
-    allowAllUsers: boolean;
+    /** One resolved isolation scope per configured bot. */
+    scopes: readonly BotScope[];
     sessions: SessionManager;
-    store: StateStore;
     pollingTimeoutSec: number;
     maxMessageLength: number;
-    workspaceRoots: string[];
     defaultCwd: string;
-    /** If set, every text sent to Telegram is appended to this file. */
-    forwardLogPath?: string;
-    /**
-     * HTTP/HTTPS proxy for Telegram traffic (e.g. `http://127.0.0.1:7897`).
-     * Passed to each bot's client; only Telegram requests use it.
-     */
-    proxy?: string;
-    /** Build a MenuCtx for a chat/client (injected from the plugin entry). */
+    /** Build a MenuCtx for one (chat, bot) pair (injected from the plugin entry). */
     menuCtxFor?: (chatId: number, botId: string) => MenuCtx;
     logger?: {
         warn(...args: unknown[]): void;
@@ -43,7 +38,7 @@ export interface BotManagerOptions {
     };
 }
 export interface BotRuntime {
-    bot: BotConfig;
+    scope: BotScope;
     client: TelegramClient;
     delivery: Delivery;
     poll: LongPoll;
@@ -58,7 +53,7 @@ export declare class BotManager {
     private readonly runtimes;
     private started;
     constructor(options: BotManagerOptions);
-    /** Ready-to-use runtimes (only successfully started bots). */
+    /** Ready-to-use runtimes (only successfully started bots), keyed by bot id. */
     get all(): Map<string, BotRuntime>;
     /** Start every bot; a per-bot startup failure is isolated and recorded. */
     start(): void;
@@ -68,7 +63,7 @@ export declare class BotManager {
     private launch;
     /** Route one Telegram update: authorize, then command or agent follow-up. */
     private handleUpdate;
-    /** Whitelist or allow-all check. */
+    /** Whitelist or allow-all check for one bot. */
     private isAllowed;
     /** Handle a callback_query (menu button press). */
     private handleCallback;

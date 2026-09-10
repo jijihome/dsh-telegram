@@ -266,7 +266,7 @@ async function doModel(ctx: MenuCtx): Promise<MenuResult> {
     ]])
   }
   return {
-    text: `🤖 选择模型(当前 ${current.model}):`,
+    text: `🤖 选择模型(当前 ${current.model};仅影响本 Bot 的这个会话):`,
     keyboard: withBack(rows),
   }
 }
@@ -306,7 +306,7 @@ function doWorkspacePick(data: string, ctx: MenuCtx): MenuResult {
   }
 }
 
-/** Apply a picked model: switch the default model selection. */
+/** Apply a picked model: switch this bot's per-chat model selection. */
 async function doModelPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
   const rest = data.slice('model:'.length)
   const sep = rest.indexOf(':')
@@ -314,7 +314,10 @@ async function doModelPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
   const model = sep >= 0 ? rest.slice(sep + 1) : rest
   try {
     await ctx.setModel(provider, model)
-    return { text: `✅ 已切换到模型: ${model}`, keyboard: mainMenuKeyboard() }
+    return {
+      text: `✅ 已切换到模型: ${model}\n(只对本 Bot 的这个 chat 生效;其他 Bot 与 GUI 不受影响)`,
+      keyboard: mainMenuKeyboard(),
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     return { text: `❌ 切换模型失败: ${msg}`, keyboard: mainMenuKeyboard() }

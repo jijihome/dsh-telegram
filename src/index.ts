@@ -5,6 +5,12 @@
  * per-chat agent sessions, and full session-process streaming (text /
  * reasoning / tool deltas) forwarded into Telegram in real time.
  *
+ * Multi-bot strict tenancy: every bot is resolved into its own `BotScope`
+ * (authorization, model default, workspace roots, proxy, data dir, host-session
+ * visibility, ops rights) and its own `StateStore`; nothing downstream reads
+ * shared plugin config. Cross-bot session sharing and bare-chat bindings are
+ * rejected at activation unless explicitly opted in.
+ *
  * Verified probe facts this plugin builds on (dsh 0.1.2-rc.1, headless):
  * - `ctx.agents` is available; `ctx.agents.create` / `ctx.agents.resume`
  *   provide the agent handles.
@@ -22,12 +28,14 @@ import { Config, type TelegramConfig } from './config.js'
 import { DshAgentFactory } from './harness/agent-factory.js'
 import { StreamListener } from './harness/stream-listener.js'
 import { SessionManager } from './core/session-manager.js'
-import { StateStore, type ChatState } from './core/state-store.js'
+import { StateStore, migrateLegacyState, botDataDir, type ChatState } from './core/state-store.js'
+import { assertSessionOwnership, resolveBotScopes, routeKey, type BotScope } from './core/bot-scope.js'
 import { BotManager, normalizeBots } from './telegram/bot-manager.js'
+import type { MenuCtx } from './telegram/menu.js'
 import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart } from './core/host.js'
 import { join } from 'node:path'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 
 export { Config }
@@ -37,7 +45,9 @@ export { StreamListener } from './harness/stream-listener.js'
 export { DshAgentFactory } from './harness/agent-factory.js'
 export type { AgentFactoryLike } from './harness/agent-factory.js'
 export { SessionManager } from './core/session-manager.js'
-export { StateStore } from './core/state-store.js'
+export { StateStore, migrateLegacyState, stateFilePath, botDataDir } from './core/state-store.js'
+export { resolveBotScopes, assertSessionOwnership, routeKey } from './core/bot-scope.js'
+export type { BotScope } from './core/bot-scope.js'
 export { getHostInfo, scheduleRestart } from './core/host.js'
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js'
 export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js'
@@ -52,139 +62,176 @@ export const inject = ['agents']
 export function apply(ctx: Context, config: TelegramConfig) {
   // Resolve the bot list: `bots[]` or the single bare `token`.
   const bots = normalizeBots(config.bots, config.token)
-  if (bots.length === 0) {
-    throw new Error('dsh-telegram: 未配置任何 Bot Token(需在配置中提供 bots[].token 或 token)')
-  }
+  const defaultCwd = process.cwd()
 
   // Direct-to-stderr logger so daemon diagnostics survive any Cordis log
   // routing/filtering in headless profiles.
   const line = (...parts: unknown[]) => process.stderr.write(`[dsh-telegram] ${parts.join(' ')}\n`)
   const logger = { warn: (...a: unknown[]) => line('WARN', ...a), error: (...a: unknown[]) => line('ERROR', ...a) }
-  // Effective proxy for Telegram traffic: explicit config wins, else the
-  // `TELEGRAM_PROXY` / `HTTPS_PROXY` env vars already present on this host. Only
-  // Telegram requests use it; other host network calls are untouched.
-  const proxy = config.proxy ?? process.env.TELEGRAM_PROXY ?? process.env.HTTPS_PROXY
-  if (proxy) line('WARN', `Telegram 流量将经代理: ${proxy}`)
-  const defaultCwd = process.cwd()
-  // Persist under a stable, DSH-home-relative path so a workspace switch (and
-  // the chat↔session binding) survives a DSH restart regardless of the host
-  // process's cwd at load time.
-  const dshHome = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? defaultCwd
-  const defaultDataDir = join(dshHome, 'plugin-data', 'dsh-telegram')
-  const dataDir = config.dataDir ?? defaultDataDir
 
-  // Persistence + session manager + agent factory.
-  const store = new StateStore({ dataDir })
-  const factory = new DshAgentFactory(ctx)
-  const sessions = new SessionManager({
-    factory,
-    store,
-    provider: config.provider ?? 'deepseek-official',
-    model: config.model ?? 'deepseek-v4-flash',
-    defaultCwd,
-    logger,
-  })
+  // Isolation domains: unique ids + unique tokens, per-bot policy; fails loud.
+  const scopes = resolveBotScopes(bots, config, defaultCwd)
+  const scopeById = new Map(scopes.map(scope => [scope.botId, scope]))
+  // A DSH session may be driven by exactly one bot unless both opted in.
+  assertSessionOwnership(scopes)
+  for (const scope of scopes) {
+    if (scope.proxy !== undefined) line('WARN', `bot "${scope.botId}" Telegram 流量将经代理: ${scope.proxy}`)
+  }
+  logger.warn(`多 Bot 严格隔离已启用:${scopes.map(s => s.botId).join(', ')}`)
 
-  // One delivery per bot.
-  const deliveries = new Map<string, Delivery>()
-  for (const bot of bots) {
-    // The BotManager creates its own clients; here we only provide the
-    // delivery instances the StreamListener needs. Reuse per-bot clients is
-    // centralized in BotManager.launch — deliveries are built there too, so
-    // this map is filled after bot start. See below for the wiring note.
+  // One-time migration of the pre-isolation shared state file into per-bot
+  // files (per dataDir; ambiguous bare keys abort activation).
+  const dataDirBots = new Map<string, string[]>()
+  for (const scope of scopes) {
+    const list = dataDirBots.get(scope.dataDir) ?? []
+    list.push(scope.botId)
+    dataDirBots.set(scope.dataDir, list)
+  }
+  for (const [dir, ids] of dataDirBots) {
+    const report = migrateLegacyState(dir, ids, logger)
+    if (report.backup !== undefined) logger.warn(`旧共享状态已备份: ${report.backup}`)
   }
 
-  // Register config session bindings: bot chat ↔ existing DSH session.
-  // Intuitive form: `bindings` nested under each bot, keyed by bare chatId.
-  for (const bot of bots) {
-    const botBindings = bot.bindings ?? {}
-    for (const [chatId, sessionId] of Object.entries(botBindings)) {
-      sessions.bind(Number(chatId), bot.id, sessionId, defaultCwd)
+  // One isolated state store per bot (its own file, plus a cross-bot key guard).
+  const stores = new Map<string, StateStore>()
+  for (const scope of scopes) {
+    // Ensure the bot's private data dir exists so its state file and forward log
+    // are actually writable (a missing dir would silently drop the log).
+    try {
+      mkdirSync(botDataDir(scope.dataDir, scope.botId), { recursive: true })
+    } catch (error) {
+      logger.error(`无法创建 bot "${scope.botId}" 的数据目录: ${String(error)}`)
+    }
+    stores.set(scope.botId, new StateStore({ dataDir: scope.dataDir, botId: scope.botId }))
+  }
+
+  const factory = new DshAgentFactory(ctx)
+  const sessions = new SessionManager({ factory, stores, scopes: scopeById, defaultCwd, logger })
+
+  // Per-bot config session bindings (chat ↔ existing DSH session). Conflicts
+  // between bots are refused here, which aborts activation on purpose.
+  for (const scope of scopes) {
+    for (const [chatId, sessionId] of Object.entries(scope.bindings)) {
+      const id = Number(chatId)
+      if (!Number.isFinite(id)) {
+        throw new Error(`dsh-telegram: bot "${scope.botId}" 的 bindings 键 "${chatId}" 不是合法 chatId`)
+      }
+      sessions.bind(id, scope.botId, sessionId, defaultCwd)
     }
   }
-  // Legacy top-level `bindings` (any bot / `botId:chatId` composite keys).
-  const legacyBindings = config.bindings ?? {}
-  for (const [key, sessionId] of Object.entries(legacyBindings)) {
+  // Legacy top-level `bindings`: `botId:chatId` composite (exact) or bare
+  // chatId (single-bot only; `bind` throws with multiple bots).
+  for (const [key, sessionId] of Object.entries(config.bindings ?? {})) {
     const sep = key.lastIndexOf(':')
-    const hasBotPrefix = sep > 0 && /^\d+$/.test(key.slice(sep + 1))
-    if (hasBotPrefix) {
-      sessions.bind(Number(key.slice(sep + 1)), key.slice(0, sep), sessionId, defaultCwd)
+    const isComposite = sep > 0 && /^\d+$/.test(key.slice(sep + 1))
+    if (isComposite) {
+      const id = Number(key.slice(sep + 1))
+      const botId = key.slice(0, sep)
+      if (!scopeById.has(botId)) {
+        throw new Error(`dsh-telegram: 旧 bindings 键 "${key}" 引用了未配置的 bot "${botId}"`)
+      }
+      sessions.bind(id, botId, sessionId, defaultCwd)
     } else {
-      sessions.bind(Number(key), '', sessionId, defaultCwd)
+      const id = Number(key)
+      if (!Number.isFinite(id)) {
+        throw new Error(`dsh-telegram: 旧 bindings 键 "${key}" 不是合法 chatId`)
+      }
+      sessions.bind(id, '', sessionId, defaultCwd)
     }
   }
 
   // Stream listener: routes session events to the right bot's delivery.
+  const deliveries = new Map<string, Delivery>()
   const listener = new StreamListener({ ctx, sessions, deliveries, logger })
 
-  // Bot manager: owns clients, polls, deliveries.
-  const provider = config.provider ?? 'deepseek-official'
-  const model = config.model ?? 'deepseek-v4-flash'
-  const readCurrentModel = () => {
-    try {
-      const adm = (ctx.get as (k: string) => unknown)?.('agentDefaultModel') as
-        { currentSelection?(): { provider: string; model: string } } | undefined
-      return adm?.currentSelection?.() ?? { provider, model }
-    } catch {
-      return { provider, model }
+  /** Read the host session roster (titles/cwd) without exposing it by itself. */
+  const hostSessionRoster = async (): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>> => {
+    const out: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }> = []
+    const seen = new Set<string>()
+    // Skip sub-agent sessions: they are child turns, not user-facing
+    // conversations, so they should not appear in the sessions picker.
+    const isSubagent = (s: { origin?: unknown }) => s?.origin === 'subagent'
+    const push = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
+      if (s === undefined || !s.id || seen.has(s.id) || isSubagent(s)) return
+      seen.add(s.id)
+      out.push({
+        id: s.id,
+        cwd: s.cwd,
+        title: s.title,
+        displayTitle: s.displayTitle ?? s.title ?? s.id,
+        updatedAt: s.updatedAt ?? 0,
+      })
     }
+    // 1) Typert gateway RPC: session.list -> { items: [ { sessionId, cwd?,
+    //    updatedAt, projections: { values: { title } } } ] } (dsh-im's channel).
+    try {
+      const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
+        { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ sessionId?: string; cwd?: string; updatedAt?: number; origin?: unknown; projections?: { values?: { title?: string } } }> }> } | undefined
+      if (gw?.invoke !== undefined) {
+        for (const ns of ['session', 'sessions'] as const) {
+          const value = await gw.invoke({ namespace: ns, method: 'list', args: {} })
+          const items = value?.items ?? []
+          for (const it of items) {
+            push({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt, origin: it?.origin })
+          }
+          if (items.length > 0) break
+        }
+      }
+    } catch { /* continue */ }
+    // 2) Direct persistence fallback: read the session cache files so the
+    //    list never empties even when the runtime channel is unavailable.
+    //    Home resolution falls back to `~/.dsh` (same $DSH_HOME caveat as
+    //    listWorkspaces above) so the session roster is still found.
+    if (out.length === 0) {
+      try {
+        const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? join(homedir(), '.dsh')
+        if (home !== '') {
+          const sdir = join(home, 'storages', 'session_projcache', 'sessions')
+          for (const name of readdirSync(sdir)) {
+            if (!name.endsWith('.json')) continue
+            let parsed: { record?: { identity?: { cwd?: string; createdAt?: number }; rows?: { title?: { val?: unknown }; sessionListMetadata?: { val?: { lastPromptAt?: number } } } } } | null
+            try { parsed = JSON.parse(readFileSync(join(sdir, name), 'utf8')) } catch { continue }
+            const rec = parsed?.record
+            const id = name.slice(0, -5)
+            const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
+            const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
+            push({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt })
+          }
+        }
+      } catch { /* best-effort */ }
+    }
+    return out
   }
-  const switchModel = async (p: string, m: string) => {
-    const adm = (ctx.get as (k: string) => unknown)?.('agentDefaultModel') as
-      { saveSelection?(next: { provider: string; model: string }): Promise<void> } | undefined
-    if (adm?.saveSelection === undefined) throw new Error('agentDefaultModel.saveSelection unavailable')
-    await adm.saveSelection({ provider: p, model: m })
-  }
-  const manager = new BotManager({
-    bots,
-    allowedUserIds: config.allowedUserIds ?? [],
-    allowAllUsers: config.allowAllUsers ?? false,
-    sessions,
-    store,
-    pollingTimeoutSec: config.pollingTimeoutSec ?? 30,
-    maxMessageLength: config.maxMessageLength ?? 4096,
-    workspaceRoots: config.workspaceRoots ?? [defaultCwd],
-    defaultCwd,
-    forwardLogPath: join(dataDir, 'forward.log'),
-    proxy,
-    menuCtxFor: (chatId, botId) => ({
+
+  /**
+   * Build the menu context for one (chat, bot) pair. Every capability is bound
+   * to that bot's scope and store, so a menu action can only ever touch its own
+   * tenant — host-wide visibility requires `allowHostSessions`.
+   */
+  const menuCtxFor = (chatId: number, botId: string): MenuCtx => {
+    const scope = scopeById.get(botId)
+    const store = stores.get(botId)
+    if (scope === undefined || store === undefined) {
+      throw new Error(`dsh-telegram: 菜单上下文缺少 bot "${botId}" 的隔离域`)
+    }
+    return {
       chatId,
       botId,
       delivery: deliveries.get(botId) as never,
       sessions,
       store,
-      workspaceRoots: config.workspaceRoots ?? [defaultCwd],
+      workspaceRoots: scope.workspaceRoots,
       defaultCwd,
-      // This chat's effective working directory: the persisted choice takes
-      // precedence over the process cwd, so a workspace switch survives the
-      // /new and a DSH restart.
-      currentCwd: () => {
-        const saved = store.getChat(`${botId}:${chatId}`)?.cwd
-        return saved ?? defaultCwd
-      },
-      setCurrentCwd: (cwd) => {
-        const key = `${botId}:${chatId}`
-        const current = store.getChat(key)
-        // Merge, so the existing sessionId/botId binding is not clobbered.
-        store.setChat(key, { ...(current ?? {}), cwd, botId } as ChatState)
-        store.flush()
-      },
-      switchSession: async (sessionId, cwd) => {
-        // Bind this chat to an existing DSH session and persist the binding, so
-        // subsequent messages route into that session and it survives a restart.
-        sessions.bind(chatId, botId, sessionId, cwd ?? defaultCwd)
-        const key = `${botId}:${chatId}`
-        const current = store.getChat(key)
-        store.setChat(key, { ...(current ?? {}), sessionId, cwd: cwd ?? defaultCwd, botId } as ChatState)
-        store.flush()
-      },
-      provider,
-      model,
+      provider: scope.provider,
+      model: scope.model,
       // Filled per-callback by the bot manager (authorization).
       userId: 0,
       canOperate: false,
       getHostInfo,
       restartDsh: () => {
+        if (!scope.allowOpsRestart) {
+          return '⛔ 本 Bot 无权重启宿主 DSH(重启会同时停掉所有 Bot);如需开启,给该 Bot 设置 allowOpsRestart: true。'
+        }
         try {
           scheduleRestart({ delayMs: 3000 })
           return '🔄 已请求重启 DSH,约 3 秒后自动重启(宿主进程将被重建)。'
@@ -193,7 +240,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
           return `❌ 重启请求失败: ${msg}`
         }
       },
-      getCurrentModel: readCurrentModel,
+      getCurrentModel: () => sessions.modelFor(chatId, botId),
       listModels: async () => {
         const llm = (ctx.get as (k: string) => unknown)?.('llm') as
           { listProviders?(): Promise<Array<{ id?: string; name?: string }>>; listModels?(provider: string): Promise<Array<{ provider?: string; id?: string; name?: string }>> } | undefined
@@ -201,7 +248,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
         const out: Array<{ provider: string; model: string }> = []
         let providers: Array<{ id?: string; name?: string }> = []
         try { providers = (await llm.listProviders?.()) ?? [] } catch { providers = [] }
-        const ids: string[] = providers.length > 0 ? providers.map(p => p.id ?? p.name).filter((x): x is string => Boolean(x)) : [provider]
+        const ids: string[] = providers.length > 0 ? providers.map(p => p.id ?? p.name).filter((x): x is string => Boolean(x)) : [scope.provider]
         for (const id of ids) {
           try {
             const ms = await llm.listModels(id)
@@ -212,7 +259,10 @@ export function apply(ctx: Context, config: TelegramConfig) {
         }
         return out
       },
-      setModel: switchModel,
+      setModel: async (provider, model) => {
+        // Per-route only: never touches the host-global default model.
+        sessions.setModel(chatId, botId, provider, model)
+      },
       listPresets: async () => {
         const ap = (ctx.get as (k: string) => unknown)?.('agentPresets') as
           { list?(): Promise<Array<{ id: string; name?: string }>> } | undefined
@@ -234,8 +284,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
        * projection (`remoteExportList`) — so the default is matched by id.
        */
       getCurrentPresetName: async () => {
-        const current = store.getChat(`${botId}:${chatId}`) as
-          (ChatState & { agentPreset?: string }) | undefined
+        const current = store.getChat(routeKey(botId, chatId))
         const selected = current?.agentPreset
         let norm: Array<{ id: string; name: string }> = []
         try {
@@ -262,8 +311,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
        * submenu to mark the active row. Returns '' when no default is known.
        */
       getCurrentPresetId: async () => {
-        const current = store.getChat(`${botId}:${chatId}`) as
-          (ChatState & { agentPreset?: string }) | undefined
+        const current = store.getChat(routeKey(botId, chatId))
         if (current?.agentPreset !== undefined && current.agentPreset !== '') return current.agentPreset
         try {
           const ap = (ctx.get as (k: string) => unknown)?.('agentPresets') as
@@ -275,13 +323,13 @@ export function apply(ctx: Context, config: TelegramConfig) {
         // Presets shape the agent at creation time; switching records the choice
         // so the next fresh session composes with it. A live runtime swap on a
         // running agent is a later refinement.
-        const current = store.getChat(`${botId}:${chatId}`)
-        store.setChat(`${botId}:${chatId}`, { ...(current ?? {}), agentPreset: id } as never)
+        sessions.setPreset(chatId, botId, id)
       },
       listWorkspaces: async () => {
-        const set = new Set<string>([defaultCwd, ...(config.workspaceRoots ?? [])])
-        // 1) Typert gateway RPC: workspace.list -> { items: [{ path, title }] }.
-        //    This is the channel dsh-im uses and returns ALL registered workspaces.
+        const set = new Set<string>([defaultCwd, ...scope.workspaceRoots])
+        // Host-wide workspaces (GUI registry, other bots' sessions) are only
+        // revealed when this bot explicitly opted in.
+        if (!scope.allowHostSessions) return [...set]
         try {
           const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
             { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ path?: string }> }> } | undefined
@@ -294,11 +342,6 @@ export function apply(ctx: Context, config: TelegramConfig) {
             }
           }
         } catch { /* continue */ }
-        // 2) Direct persistence fallback: read the workspace registry file so the
-        //    list never empties even when the runtime channel is unavailable.
-        //    Home resolution falls back to `~/.dsh` so the plugin still finds the
-        //    registry when the host process has NOT exported $DSH_HOME (the dsh
-        //    launcher inherits the shell env, which usually lacks it).
         try {
           const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? join(homedir(), '.dsh')
           if (home !== '') {
@@ -310,75 +353,63 @@ export function apply(ctx: Context, config: TelegramConfig) {
             }
           }
         } catch { /* best-effort */ }
-        // 3) Fall back to any cwd seen on sessions.
         try {
           const sessionsSvc = (ctx.get as (k: string) => unknown)?.('sessions') as
             { list?(): Promise<Array<{ cwd?: string }>> } | undefined
-          const sessions = await sessionsSvc?.list?.()
-          for (const s of (sessions ?? [])) {
+          const list = await sessionsSvc?.list?.()
+          for (const s of (list ?? [])) {
             if (typeof s.cwd === 'string' && s.cwd) set.add(s.cwd)
           }
         } catch { /* best-effort; fall back to the configured roots */ }
         return [...set]
       },
       listSessions: async () => {
-        const out: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }> = []
-        const seen = new Set<string>()
-        // Skip sub-agent sessions: they are child turns, not user-facing
-        // conversations, so they should not appear in the sessions picker.
-        const isSubagent = (s: { origin?: unknown }) => s?.origin === 'subagent'
-        const push = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
-          if (s === undefined || !s.id || seen.has(s.id) || isSubagent(s)) return
-          seen.add(s.id)
-          out.push({
-            id: s.id,
-            cwd: s.cwd,
-            title: s.title,
-            displayTitle: s.displayTitle ?? s.title ?? s.id,
-            updatedAt: s.updatedAt ?? 0,
-          })
-        }
-        // 1) Typert gateway RPC: session.list -> { items: [ { sessionId, cwd?,
-        //    updatedAt, projections: { values: { title } } } ] } (dsh-im's channel).
-        try {
-          const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
-            { invoke?(opts: { namespace: string; method: string; args?: unknown }): Promise<{ items?: Array<{ sessionId?: string; cwd?: string; updatedAt?: number; origin?: unknown; projections?: { values?: { title?: string } } }> }> } | undefined
-          if (gw?.invoke !== undefined) {
-            for (const ns of ['session', 'sessions'] as const) {
-              const value = await gw.invoke({ namespace: ns, method: 'list', args: {} })
-              const items = value?.items ?? []
-              for (const it of items) {
-                push({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt, origin: it?.origin })
-              }
-              if (items.length > 0) break
-            }
-          }
-        } catch { /* continue */ }
-        // 2) Direct persistence fallback: read the session cache files so the
-        //    list never empties even when the runtime channel is unavailable.
-        //    Home resolution falls back to `~/.dsh` (same $DSH_HOME caveat as
-        //    listWorkspaces above) so the session roster is still found.
-        if (out.length === 0) {
-          try {
-            const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? join(homedir(), '.dsh')
-            if (home !== '') {
-              const sdir = join(home, 'storages', 'session_projcache', 'sessions')
-              for (const name of readdirSync(sdir)) {
-                if (!name.endsWith('.json')) continue
-                let parsed: { record?: { identity?: { cwd?: string; createdAt?: number }; rows?: { title?: { val?: unknown }; sessionListMetadata?: { val?: { lastPromptAt?: number } } } } } | null
-                try { parsed = JSON.parse(readFileSync(join(sdir, name), 'utf8')) } catch { continue }
-                const rec = parsed?.record
-                const id = name.slice(0, -5)
-                const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
-                const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
-                push({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt })
-              }
-            }
-          } catch { /* best-effort */ }
+        const owned = sessions.sessionIdsFor(botId)
+        const roster = await hostSessionRoster()
+        if (scope.allowHostSessions) return roster
+        // Strict default: only sessions this bot owns (its own agents, its
+        // config bindings, and chats it persisted). Foreign sessions are hidden.
+        const out = roster.filter(s => owned.has(s.id))
+        const seen = new Set(out.map(s => s.id))
+        for (const id of owned) {
+          if (seen.has(id)) continue
+          const state = Object.values(store.allChats()).find(c => c.sessionId === id)
+          out.push({ id, cwd: state?.cwd, displayTitle: id, updatedAt: 0 })
         }
         return out
       },
-    }),
+      /**
+       * Switch this chat to an existing DSH session. Strict isolation: the
+       * session must already belong to this bot unless `allowHostSessions` is on.
+       */
+      switchSession: async (sessionId, cwd) => {
+        if (!scope.allowHostSessions && !sessions.ownsSession(botId, sessionId)) {
+          throw new Error(
+            `会话 ${sessionId} 不属于 bot "${botId}";严格隔离下不能附加到其他 Bot/GUI 的会话。`
+            + '如确需,给该 Bot 设置 allowHostSessions: true。',
+          )
+        }
+        sessions.bind(chatId, botId, sessionId, cwd ?? defaultCwd)
+        sessions.setCwd(chatId, botId, cwd ?? defaultCwd)
+      },
+      // This chat's effective working directory: the persisted choice takes
+      // precedence over the process cwd, so a workspace switch survives the
+      // /new and a DSH restart. Read from this bot's own store only.
+      currentCwd: () => store.getChat(routeKey(botId, chatId))?.cwd ?? defaultCwd,
+      setCurrentCwd: (cwd) => {
+        sessions.setCwd(chatId, botId, cwd)
+      },
+    }
+  }
+
+  // Bot manager: owns clients, polls, deliveries — one runtime per scope.
+  const manager = new BotManager({
+    scopes,
+    sessions,
+    pollingTimeoutSec: config.pollingTimeoutSec ?? 30,
+    maxMessageLength: config.maxMessageLength ?? 4096,
+    defaultCwd,
+    menuCtxFor,
     logger,
   })
 
@@ -393,12 +424,17 @@ export function apply(ctx: Context, config: TelegramConfig) {
   manager.start()
   attachDeliveries()
 
-  // Persist offsets periodically (debounced) and on unload.
+  // Persist offsets periodically (debounced) and on unload — each bot into its
+  // own file through its own store.
   const flushTimer = setInterval(() => {
     for (const [id, runtime] of manager.all) {
-      store.setOffset(id, runtime.poll.currentOffset)
+      try {
+        stores.get(id)?.setOffset(id, runtime.poll.currentOffset)
+        stores.get(id)?.flush()
+      } catch (error) {
+        logger.warn(`offset flush failed for ${id}: ${String(error)}`)
+      }
     }
-    store.flush()
   }, 5000)
   // Headless exits as soon as its task settles. Keep one ref'ed timer while
   // enabled so Telegram long polling remains a daemon after the initial task.
@@ -410,9 +446,12 @@ export function apply(ctx: Context, config: TelegramConfig) {
       if (keepAliveTimer !== undefined) clearInterval(keepAliveTimer)
       listener.stop()
       void manager.stop().finally(() => {
-        store.flush()
+        for (const scope of scopes) stores.get(scope.botId)?.flush()
       })
       void sessions.disposeAll()
     }
   }, 'dsh-telegram.serve')
 }
+
+/** Re-exported for consumers that only need the per-chat state shape. */
+export type { ChatState }

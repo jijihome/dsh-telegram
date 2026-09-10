@@ -6,7 +6,7 @@ Telegram 桥接插件,让 DeepSeek Harness (dsh) 的 agent 通过 Telegram 使�
 
 ## 功能
 
-- **多 Bot 长轮询**:`bots: [{ id, token }]`,每个 Bot 独立连接、独立故障隔离(一个 Bot 挂掉不影响其他)
+- **多 Bot 长轮询 + 严格租户隔离**:`bots: [{ id, token }]`,每个 Bot 独立连接、独立故障隔离(一个 Bot 挂掉不影响其他),并且拥有**独立的授权/模型/工作区/代理/数据目录/日志**隔离域(见「多 Bot 隔离」一节)
 - **完整会话过程实时转发**(任务书核心要求):
   - 文本增量:`assistant/chunk` → `text-delta` 实时编辑同一条消息
   - 推理增量:`reasoning-delta` 流入同一条消息
@@ -16,7 +16,7 @@ Telegram 桥接插件,让 DeepSeek Harness (dsh) 的 agent 通过 Telegram 使�
 - **每 chat 独立 agent 会话**:session id = `telegram:<botId>:<chatId>`,`/new` 轮换新会话
 - **运维菜单**(`/menu` → ⚙️ 运维):**🔄 重启 DSH**、💻 系统信息。重启通过脱离宿主的代理进程 kill 宿主 DSH 再用原命令重建(宿主进程不在 pm2 下也能恢复);**仅白名单用户可用**(`allowedUserIds` / `allowAllUsers`)
 - **命令系统**:`/start` `/help` `/new` `/clear` `/stop` `/workspace` `/session`
-- **持久化**:chat↔session 绑定、工作目录、长轮询 offset 存 `<cwd>/data/state.json`,重启后自动恢复(会话经 `ctx.agents.resume` 续接,offset 不重复拉取)
+- **持久化**:chat↔session 绑定、工作目录、长轮询 offset、per-chat 模型存 `<dataDir>/bots/<botId>/state.json`(**每个 Bot 一个文件**),重启后自动恢复(会话经 `ctx.agents.resume` 续接,offset 不重复拉取);旧版共享 `state.json` 首次启动自动按 Bot 拆分并保留备份
 - **白名单**:默认拒绝所有用户,`allowedUserIds` 放行,`allowAllUsers: true` 放行一切(仅开发)
 - **fail loud**:无 Token 直接启动报错;fail closed:白名单为空拒绝所有人
 
@@ -60,17 +60,42 @@ dsh --profile <name> --dump-config | grep telegram
 
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `bots` | `[]` | Bot 数组;`[{ id, token, bindings? }]` |
+| `bots` | `[]` | Bot 数组;`[{ id, token, ...per-bot 覆盖 }]` |
 | `token` | - | 单 Bot 简写;与 `bots` 二选一 |
 | `allowedUserIds` | `[]` | 允许的 Telegram 用户 id;空 = 拒绝所有人 |
 | `allowAllUsers` | `false` | 放行所有用户(仅开发) |
-| `provider` | `deepseek-official` | LLM provider id |
-| `model` | `deepseek-v4-flash` | 模型 id |
+| `provider` / `model` | `deepseek-official` / `deepseek-v4-flash` | 各 Bot 的默认 LLM 选择 |
 | `maxMessageLength` | `4096` | 消息长度上限 |
 | `pollingTimeoutSec` | `30` | 长轮询超时(秒) |
 | `workspaceRoots` | `[cwd]` | /workspace 可浏览的根目录 |
-| `dataDir` | `<cwd>/data` | 持久化目录 |
+| `dataDir` | `<DSH_HOME>/plugin-data/dsh-telegram` | 每 Bot 状态根目录(实际写入 `<dataDir>/bots/<botId>/`) |
+| `allowHostSessions` | `false` | 是否允许各 Bot 枚举/附加宿主的全部会话与工作区 |
+| `allowOpsRestart` | 单 Bot 时 `true` | 是否允许「重启 DSH」(会停掉所有 Bot) |
+| `allowSharedSessions` | `false` | 是否允许同一 DSH 会话被多个 Bot 绑定 |
 | `bots[].bindings` | - | 该 bot 的 chatId → 已存在 DSH 会话(双向绑定) |
+| `bots[].allowedUserIds` / `allowAllUsers` | 继承插件级 | 该 Bot 独立的授权名单 |
+| `bots[].provider` / `model` | 继承插件级 | 该 Bot 独立的默认模型 |
+| `bots[].workspaceRoots` / `proxy` / `dataDir` | 继承插件级 | 该 Bot 独立的工作区根、代理、状态目录 |
+| `bots[].allowHostSessions` / `allowOpsRestart` / `allowSharedSessions` | 继承插件级 | 该 Bot 独立的可见性与运维权限 |
+
+## 多 Bot 隔离
+
+每个 Bot 是一个**隔离域(BotScope)**:授权名单、默认模型、工作区根、代理、状态目录、forward 日志、宿主会话可见性、运维权限全部按 Bot 解析,下游不再读取共享配置。
+
+| 隔离面 | 行为 |
+| --- | --- |
+| 身份 | `botId` 必须唯一且不含 `:`;`token` 必须唯一(共用 token 会互抢 getUpdates)。违反则**启动即失败**,不做 last-wins 覆盖 |
+| 模型 | 菜单切换写入 `botId:chatId` 的 per-chat 状态并热切换该路由的 agent;**从不读写宿主全局 `agentDefaultModel`**,因此不影响其他 Bot 与 GUI |
+| 会话归属 | 一个 DSH 会话只能属于一个「Bot+chat」路由;重复绑定直接报错(除非相关 Bot 都设 `allowSharedSessions: true`) |
+| 出站路由 | 事件按 sessionId 反查唯一路由;非本插件会话 O(1) 丢弃,不存在跨 Bot 扇出 |
+| 入站绑定 | 裸 `chatId` 绑定仅在**单 Bot** 下可用;多 Bot 下写裸键会启动失败(必须写 `<botId>:<chatId>`) |
+| `/new` | 一定新建全新 session(不 resume 旧会话),并解除该 chat 的配置绑定 |
+| 状态 | 每 Bot 一个 `state.json`,store 带跨 Bot 键守卫(越界即抛错);forward 日志在各自目录 |
+| 可见性 | 会话/工作区菜单默认只显示本 Bot 拥有的会话;要看到宿主全部会话需显式 `allowHostSessions: true` |
+| 运维 | 「重启 DSH」默认仅单 Bot 可用;多 Bot 下需给该 Bot 显式 `allowOpsRestart: true`(重启会停掉所有 Bot) |
+| 故障 | 仍共享一个宿主进程:Bot 连接与投递已隔离,但宿主崩溃/OOM/事件循环阻塞仍是共同风险。需要硬隔离请让每个 Bot 跑独立 `DSH_HOME`/profile |
+
+**升级迁移**:首次启动会自动把旧的共享 `<dataDir>/state.json` 按 Bot 拆分到 `bots/<botId>/state.json`,原文件保留为 `state.json.migrated-<时间戳>` 并另存 `.backup-<时间戳>`;若旧文件里存在裸 `chatId` 键而配置了多个 Bot,启动会失败并列出这些键,需手工改写为 `<botId>:<chatId>`。
 
 ## 命令
 
@@ -107,7 +132,8 @@ src/
 ├── core/
 │   ├── event-normalizer.ts # DSH 事件 → 统一消息流(文本/推理/工具/状态)
 │   ├── renderer.ts         # 消息流 → Telegram 显示文本
-│   ├── state-store.ts      # chat↔session/offset 持久化(JSON)
+│   ├── state-store.ts      # per-bot 状态持久化(独立文件 + 跨 Bot 键守卫 + 旧数据迁移)
+│   ├── bot-scope.ts        # BotScope:每 Bot 隔离域解析与唯一性校验(fail loud)
 │   ├── host.ts            # 宿主进程信息 + 重启调度(spawn detached agent)
 │   ├── host-agent.ts      # 脱离宿主的重启代理:kill 宿主→重建(纯入口,不被 import)
 │   ├── session-manager.ts  # per-chat 会话获取/轮换/取消/resume
