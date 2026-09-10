@@ -27,7 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Config, type TelegramConfig } from './config.js'
 import { DshAgentFactory } from './harness/agent-factory.js'
 import { StreamListener } from './harness/stream-listener.js'
-import { SessionManager } from './core/session-manager.js'
+import { SessionManager, preferSession } from './core/session-manager.js'
 import { StateStore, migrateLegacyState, botDataDir, type ChatState } from './core/state-store.js'
 import { assertSessionOwnership, resolveBotScopes, routeKey, type BotScope } from './core/bot-scope.js'
 import { BotManager, normalizeBots } from './telegram/bot-manager.js'
@@ -180,14 +180,25 @@ export function apply(ctx: Context, config: TelegramConfig) {
   }
 
   // Per-bot config session bindings (chat ↔ existing DSH session). Conflicts
-  // between bots are refused here, which aborts activation on purpose.
+  // between bots are refused here, which aborts activation on purpose. The config
+  // value SEEDS the chat: a session the operator picked later (persisted in the
+  // chat state) wins, so a restart no longer throws that choice away.
+  const seedBinding = (chatId: number, botId: string, sessionId: string): void => {
+    const owner = botId === '' ? scopes[0]!.botId : botId
+    const persisted = stores.get(owner)?.getChat(routeKey(owner, chatId))?.sessionId
+    const target = preferSession(sessionId, persisted)
+    if (target !== sessionId) {
+      logger.warn(`bot "${owner}" chat ${chatId} 沿用上次选择的会话 ${target}(未使用配置绑定 ${sessionId})`)
+    }
+    sessions.bind(chatId, botId, target, defaultCwd)
+  }
   for (const scope of scopes) {
     for (const [chatId, sessionId] of Object.entries(scope.bindings)) {
       const id = Number(chatId)
       if (!Number.isFinite(id)) {
         throw new Error(`dsh-telegram: bot "${scope.botId}" 的 bindings 键 "${chatId}" 不是合法 chatId`)
       }
-      sessions.bind(id, scope.botId, sessionId, defaultCwd)
+      seedBinding(id, scope.botId, sessionId)
     }
   }
   // Legacy top-level `bindings`: `botId:chatId` composite (exact) or bare
@@ -201,13 +212,13 @@ export function apply(ctx: Context, config: TelegramConfig) {
       if (!scopeById.has(botId)) {
         throw new Error(`dsh-telegram: 旧 bindings 键 "${key}" 引用了未配置的 bot "${botId}"`)
       }
-      sessions.bind(id, botId, sessionId, defaultCwd)
+      seedBinding(id, botId, sessionId)
     } else {
       const id = Number(key)
       if (!Number.isFinite(id)) {
         throw new Error(`dsh-telegram: 旧 bindings 键 "${key}" 不是合法 chatId`)
       }
-      sessions.bind(id, '', sessionId, defaultCwd)
+      seedBinding(id, '', sessionId)
     }
   }
 

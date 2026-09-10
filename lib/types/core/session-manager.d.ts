@@ -87,6 +87,19 @@ export interface ModelInfo {
     model: string;
     source: ModelSource;
 }
+/**
+ * Decide which session a chat should drive at startup.
+ *
+ * A config `bindings` entry is a SEED, not an override: once the operator picked
+ * a session from the 会话 menu that choice is persisted, and re-applying the
+ * static config value on every start silently threw the choice away (the list
+ * stopped marking it and the chat jumped back to the config session).
+ *
+ * @param configSessionId - session declared in the bot's config bindings.
+ * @param persistedSessionId - session recorded for this chat in its state file.
+ * @returns the session to drive: the persisted one when present.
+ */
+export declare function preferSession(configSessionId: string, persistedSessionId: string | undefined): string;
 /** Manages per-(bot, chat) agent sessions. */
 export declare class SessionManager {
     private readonly factory;

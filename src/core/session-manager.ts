@@ -92,6 +92,22 @@ export interface ModelInfo {
   source: ModelSource
 }
 
+/**
+ * Decide which session a chat should drive at startup.
+ *
+ * A config `bindings` entry is a SEED, not an override: once the operator picked
+ * a session from the 会话 menu that choice is persisted, and re-applying the
+ * static config value on every start silently threw the choice away (the list
+ * stopped marking it and the chat jumped back to the config session).
+ *
+ * @param configSessionId - session declared in the bot's config bindings.
+ * @param persistedSessionId - session recorded for this chat in its state file.
+ * @returns the session to drive: the persisted one when present.
+ */
+export function preferSession(configSessionId: string, persistedSessionId: string | undefined): string {
+  return persistedSessionId !== undefined && persistedSessionId !== '' ? persistedSessionId : configSessionId
+}
+
 /** Stable message text for logging. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

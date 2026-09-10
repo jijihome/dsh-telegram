@@ -18,7 +18,7 @@ import { join } from 'node:path'
 
 import { resolveBotScopes, assertSessionOwnership } from '../lib/core/bot-scope.js'
 import { StateStore, migrateLegacyState, stateFilePath, botDataDir } from '../lib/core/state-store.js'
-import { SessionManager } from '../lib/core/session-manager.js'
+import { SessionManager, preferSession } from '../lib/core/session-manager.js'
 import { DshAgentFactory } from '../lib/harness/agent-factory.js'
 import { StreamListener } from '../lib/harness/stream-listener.js'
 import { parseAgentDefaultModel, readHostDefaultModel } from '../lib/core/host-default-model.js'
@@ -736,4 +736,33 @@ test('an undefined poll offset never erases the restored cursor', () => {
   store.flush()
   const file = JSON.parse(readFileSync(stateFilePath(env.dir, 'bot-a'), 'utf8'))
   assert.equal(file.offsets['bot-a'], 4242, 'the cursor survives a restart')
+})
+
+test('a session chosen later wins over the static config binding', () => {
+  // The config binding is re-applied on every start; without this precedence the
+  // operator's menu choice was silently replaced after each restart.
+  assert.equal(preferSession('session-from-config', 'session-chosen-by-user'), 'session-chosen-by-user')
+  assert.equal(preferSession('session-from-config', undefined), 'session-from-config', 'first start seeds from config')
+  assert.equal(preferSession('session-from-config', ''), 'session-from-config', 'an empty record is not a choice')
+})
+
+test('the config binding is seeded only into the chat state, and the choice survives', () => {
+  const env = makeEnv()
+  const manager = makeManager(env, fakeFactory())
+  // Startup seeding (what index.ts does for a config binding).
+  const persisted = env.stores.get('bot-a').getChat('bot-a:5')?.sessionId
+  manager.bind(5, 'bot-a', preferSession('session-from-config', persisted), 'E:/ws')
+  assert.equal(manager.activeSessionId(5, 'bot-a'), 'session-from-config')
+  assert.equal(env.stores.get('bot-a').getChat('bot-a:5').sessionId, 'session-from-config')
+
+  // The operator picks another session from the menu.
+  manager.bind(5, 'bot-a', 'session-chosen-by-user', 'E:/ws')
+
+  // Next start: the persisted choice must win over the config binding.
+  const restarted = makeManager(env, fakeFactory())
+  const persisted2 = env.stores.get('bot-a').getChat('bot-a:5')?.sessionId
+  assert.equal(persisted2, 'session-chosen-by-user')
+  restarted.bind(5, 'bot-a', preferSession('session-from-config', persisted2), 'E:/ws')
+  assert.equal(restarted.activeSessionId(5, 'bot-a'), 'session-chosen-by-user',
+    'the restart keeps driving the conversation the operator picked')
 })
