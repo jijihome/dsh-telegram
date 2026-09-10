@@ -57,9 +57,13 @@ export declare function routeKey(botId: string, chatId: number): string;
  * @param bots - normalized bot list (`bots[]` or the single-token fallback).
  * @param config - plugin-level config supplying defaults for unset bot fields.
  * @param defaultCwd - host process cwd; the last-resort workspace root.
+ * @param envProxy - proxy inherited from the environment (`TELEGRAM_PROXY` /
+ *   `HTTPS_PROXY`), used when neither the bot nor the plugin config sets one.
+ *   Without it a deployment that only relied on the machine-wide proxy variable
+ *   would talk to Telegram directly and time out.
  * @throws when the bot set cannot be isolated (duplicate id/token, bad id, no bots).
  */
-export declare function resolveBotScopes(bots: BotConfig[], config: TelegramConfig, defaultCwd: string): BotScope[];
+export declare function resolveBotScopes(bots: BotConfig[], config: TelegramConfig, defaultCwd: string, envProxy?: string): BotScope[];
 /** Default state root: `<DSH_HOME>/plugin-data/dsh-telegram`. */
 export declare function joinDefaultDataDir(defaultCwd: string): string;
 /**

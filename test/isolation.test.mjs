@@ -696,3 +696,28 @@ test('the active-session marker follows a menu-chosen binding across a restart',
   assert.equal(restarted.activeSessionId(5, 'bot-a'), 'session-chosen',
     'the persisted session keeps its marker and is the one that gets resumed')
 })
+
+// --------------------------------------------------------------- proxy chain
+
+test('the environment proxy is the last-resort Telegram proxy', () => {
+  const scopes = resolveBotScopes(
+    [{ id: 'a', token: 't1' }, { id: 'b', token: 't2', proxy: 'http://bot-proxy' }],
+    { proxy: 'http://plugin-proxy', dataDir: 'E:/d' },
+    'E:/ws',
+    'http://env-proxy',
+  )
+  assert.equal(scopes.find(s => s.botId === 'a').proxy, 'http://plugin-proxy',
+    'plugin config beats the environment proxy')
+  assert.equal(scopes.find(s => s.botId === 'b').proxy, 'http://bot-proxy',
+    'per-bot proxy beats the plugin config')
+
+  const envOnly = resolveBotScopes([{ id: 'c', token: 't3' }], { dataDir: 'E:/d' }, 'E:/ws', 'http://env-proxy')
+  assert.equal(envOnly[0].proxy, 'http://env-proxy',
+    'a machine-wide TELEGRAM_PROXY/HTTPS_PROXY must still reach Telegram (no direct-connect timeout)')
+
+  const explicitEmpty = resolveBotScopes([{ id: 'd', token: 't4', proxy: '' }], { dataDir: 'E:/d' }, 'E:/ws', 'http://env-proxy')
+  assert.equal(explicitEmpty[0].proxy, 'http://env-proxy', 'an empty string is treated as "not set"')
+
+  const none = resolveBotScopes([{ id: 'e', token: 't5' }], { dataDir: 'E:/d' }, 'E:/ws')
+  assert.equal(none[0].proxy, undefined, 'no proxy anywhere -> undefined (plugin logs a direct-connect warning)')
+})

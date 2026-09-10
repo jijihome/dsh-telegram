@@ -84,9 +84,18 @@ export function routeKey(botId: string, chatId: number): string {
  * @param bots - normalized bot list (`bots[]` or the single-token fallback).
  * @param config - plugin-level config supplying defaults for unset bot fields.
  * @param defaultCwd - host process cwd; the last-resort workspace root.
+ * @param envProxy - proxy inherited from the environment (`TELEGRAM_PROXY` /
+ *   `HTTPS_PROXY`), used when neither the bot nor the plugin config sets one.
+ *   Without it a deployment that only relied on the machine-wide proxy variable
+ *   would talk to Telegram directly and time out.
  * @throws when the bot set cannot be isolated (duplicate id/token, bad id, no bots).
  */
-export function resolveBotScopes(bots: BotConfig[], config: TelegramConfig, defaultCwd: string): BotScope[] {
+export function resolveBotScopes(
+  bots: BotConfig[],
+  config: TelegramConfig,
+  defaultCwd: string,
+  envProxy?: string,
+): BotScope[] {
   if (bots.length === 0) {
     throw new Error('dsh-telegram: 未配置任何 Bot Token(需在配置中提供 bots[].token 或 token)')
   }
@@ -146,9 +155,10 @@ export function resolveBotScopes(bots: BotConfig[], config: TelegramConfig, defa
       model: pinnedModel ?? DEFAULT_MODEL,
       modelPinned: pinnedProvider !== undefined || pinnedModel !== undefined,
       workspaceRoots: inheritList(bot.workspaceRoots, config.workspaceRoots, [defaultCwd]),
-      ...(bot.proxy !== undefined ? { proxy: bot.proxy }
-        : config.proxy !== undefined ? { proxy: config.proxy }
-          : {}),
+      ...(bot.proxy !== undefined && bot.proxy !== '' ? { proxy: bot.proxy }
+        : config.proxy !== undefined && config.proxy !== '' ? { proxy: config.proxy }
+          : envProxy !== undefined && envProxy !== '' ? { proxy: envProxy }
+            : {}),
       dataDir,
       allowHostSessions: bot.allowHostSessions ?? globalHostSessions,
       // Restarting the host stops every bot, so it is a single-bot-only default.
