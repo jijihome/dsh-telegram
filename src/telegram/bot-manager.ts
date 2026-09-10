@@ -273,8 +273,9 @@ export class BotManager {
     }
     const data = callbackQuery.data ?? ''
     // A pending interactive answer (user-questions / approval) consumes the press
-    // before any menu routing.
-    if (this.options.respond !== undefined) {
+    // before any menu routing — but ONLY for an authorized sender, so an
+    // unauthorized user cannot answer (e.g. approve / reject) a pending prompt.
+    if (this.options.respond !== undefined && this.isAllowed(scope, callbackQuery.from?.id ?? 0)) {
       try {
         if (await this.options.respond.onCallback(data, chatId, scope.botId)) return
       } catch (error) {

@@ -108,15 +108,25 @@ export function registerInteractions(options: InteractionOptions): InteractionRe
     if (pending === undefined) return next() // 该聊天已有问题在等 → 交还宿主
 
     const answer = await new Promise<AskUserQuestionAnswer | undefined>(resolveWait => {
-      pending.resolve = value => resolveWait(value as AskUserQuestionAnswer | undefined)
+      const onAbort = () => store.finish(pending, undefined)
+      request.signal?.addEventListener('abort', onAbort, { once: true })
+      pending.resolve = value => {
+        request.signal?.removeEventListener('abort', onAbort)
+        resolveWait(value as AskUserQuestionAnswer | undefined)
+      }
       pending.onTimeout = () => {
         void delivery.sendFinal(target.chatId, '⏳ 该选择等待超时，已交还宿主处理')
       }
-      const { text, keyboard } = renderQuestions(request.questions, token)
-      pending.meta = questionMetaOf(request.questions, token)
-      delivery.sendMenu(target.chatId, text, keyboard).catch(() => {
+      try {
+        const { text, keyboard } = renderQuestions(request.questions, token)
+        pending.meta = questionMetaOf(request.questions, token)
+        void delivery.sendMenu(target.chatId, text, keyboard).catch(() => {
+          store.finish(pending, undefined)
+        })
+      } catch (error) {
+        // 渲染/发送同步异常不得让瀑布停摆：放弃等待并交还宿主。
         store.finish(pending, undefined)
-      })
+      }
     })
     if (answer === undefined) return next()
     return answer
@@ -134,15 +144,25 @@ export function registerInteractions(options: InteractionOptions): InteractionRe
     if (pending === undefined) return next() // 该聊天已有审批在等 → 交还宿主
 
     const outcome = await new Promise<ApprovalOutcome | undefined>(resolveWait => {
-      pending.resolve = value => resolveWait(value as ApprovalOutcome | undefined)
+      const onAbort = () => store.finish(pending, undefined)
+      request.signal?.addEventListener('abort', onAbort, { once: true })
+      pending.resolve = value => {
+        request.signal?.removeEventListener('abort', onAbort)
+        resolveWait(value as ApprovalOutcome | undefined)
+      }
       pending.onTimeout = () => {
         void delivery.sendFinal(target.chatId, '⏳ 该审批等待超时，已交还宿主处理')
       }
-      const { text, keyboard } = renderApproval(request.toolName, request.reason, token, words)
-      pending.meta = approvalMetaOf(token, request.toolName, request.reason)
-      delivery.sendMenu(target.chatId, text, keyboard).catch(() => {
+      try {
+        const { text, keyboard } = renderApproval(request.toolName, request.reason, token, words)
+        pending.meta = approvalMetaOf(token, request.toolName, request.reason)
+        void delivery.sendMenu(target.chatId, text, keyboard).catch(() => {
+          store.finish(pending, undefined)
+        })
+      } catch (error) {
+        // 渲染/发送同步异常不得让瀑布停摆：放弃等待并交还宿主。
         store.finish(pending, undefined)
-      })
+      }
     })
     if (outcome === undefined) return next()
     return outcome
