@@ -157,6 +157,8 @@ async function commandWorkspace(text: string, ctx: CommandContext): Promise<Comm
 }
 
 function commandSession(ctx: CommandContext): CommandResult {
+  const persisted = ctx.store.getChat(`${ctx.botId}:${ctx.chatId}`)
+  const active = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
   // A config-bound chat shows its bound session first, then the own-session.
   const bound = ctx.sessions.getBound(ctx.chatId, ctx.botId)
   if (bound !== undefined) {
@@ -174,9 +176,22 @@ function commandSession(ctx: CommandContext): CommandResult {
   }
   const binding = ctx.sessions.get(ctx.chatId, ctx.botId)
   if (binding === undefined) {
+    // No live agent yet (e.g. right after a DSH restart). The persisted id is
+    // still the conversation this chat will resume, so report it instead of
+    // claiming there is none.
+    if (active !== undefined) {
+      return {
+        handled: true,
+        reply: [
+          '📄 会话状态(未激活,首条消息时恢复):',
+          `• session: ${active}`,
+          `• cwd: ${persisted?.cwd ?? ctx.defaultCwd}`,
+          `• 持久化: ${persisted !== undefined ? '是' : '否'}`,
+        ].join('\n'),
+      }
+    }
     return { handled: true, reply: 'ℹ️ 尚无会话;发送消息会自动创建。' }
   }
-  const persisted = ctx.store.getChat(`${ctx.botId}:${ctx.chatId}`)
   return {
     handled: true,
     reply: [

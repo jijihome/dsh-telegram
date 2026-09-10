@@ -649,3 +649,50 @@ test('a fresh session keeps using the route selection, not a foreign session mod
   assert.notEqual(binding.sessionId, 'session-other')
   assert.deepEqual(manager.modelInfo(5, 'bot-a'), { provider: 'host-prov', model: 'host-model', source: 'host' })
 })
+
+// ------------------------------------------------- restart / session survival
+
+test('after a restart the persisted session is still active (no loss, marker intact)', async () => {
+  const env = makeEnv()
+  const factory = fakeFactory()
+  const before = makeManager(env, factory)
+  const created = await before.getOrCreate(5, 'bot-a')
+
+  // Simulate a DSH restart: brand-new manager/factory over the same state store.
+  const restarted = makeManager(env, fakeFactory())
+  assert.equal(restarted.activeSessionId(5, 'bot-a'), created.sessionId,
+    'the session list must still mark the conversation that will be resumed')
+  assert.equal(restarted.get(5, 'bot-a'), undefined, 'no live binding exists yet')
+
+  const resumed = await restarted.getOrCreate(5, 'bot-a')
+  assert.equal(resumed.sessionId, created.sessionId, 'the same conversation continues')
+  assert.equal(restarted.activeSessionId(5, 'bot-a'), created.sessionId)
+})
+
+test('an already-live session is adopted, never resumed (a failed resume would start a fresh session)', async () => {
+  const env = makeEnv()
+  const factory = fakeFactory()
+  const before = makeManager(env, factory)
+  const created = await before.getOrCreate(5, 'bot-a')
+  const callsBefore = factory.requests.length
+
+  // Same process, same registry: the agent for that session is still live.
+  const restarted = makeManager(env, factory)
+  const adopted = await restarted.getOrCreate(5, 'bot-a')
+  assert.equal(adopted.sessionId, created.sessionId)
+  assert.equal(factory.requests.length, callsBefore, 'no resume/create call was made for a live session')
+  assert.equal(factory.disposals.length, 0, 'the plugin must not dispose an agent it does not own')
+})
+
+test('the active-session marker follows a menu-chosen binding across a restart', () => {
+  const env = makeEnv()
+  const before = makeManager(env, fakeFactory())
+  before.bind(5, 'bot-a', 'session-chosen', 'E:/ws')
+  before.setCwd(5, 'bot-a', 'E:/projects/x')
+  assert.equal(before.activeSessionId(5, 'bot-a'), 'session-chosen')
+
+  const restarted = makeManager(env, fakeFactory())
+  assert.equal(restarted.getBound(5, 'bot-a'), undefined, 'menu bindings are not config bindings')
+  assert.equal(restarted.activeSessionId(5, 'bot-a'), 'session-chosen',
+    'the persisted session keeps its marker and is the one that gets resumed')
+})

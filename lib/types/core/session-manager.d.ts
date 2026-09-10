@@ -120,6 +120,16 @@ export declare class SessionManager {
      * switch survives a `/new` and a DSH restart.
      */
     chatCwd(chatId: number, botId: string): string;
+    /**
+     * The session this chat is currently driving, in priority order: its config
+     * binding, its live binding, then the session id persisted for it.
+     *
+     * The persisted id matters right after a DSH restart: a session chosen from the
+     * menu is stored but not re-registered as a binding, so without this fallback
+     * the 会话 menu would show no ✅ on the conversation that is actually going to
+     * be resumed (it looked like the session was lost, while the id was intact).
+     */
+    activeSessionId(chatId: number, botId: string): string | undefined;
     /** Mark a session id as one this plugin owns or is bound to (event gate). */
     markRelevant(sessionId: string): void;
     /**
@@ -203,11 +213,6 @@ export declare class SessionManager {
      * The host-global selection is only ever READ; the plugin never writes it.
      */
     modelInfo(chatId: number, botId: string): ModelInfo;
-    /**
-     * The session this chat is currently driving: its config binding wins, else its
-     * own live session. Used to resolve the inherited model and to scope model picks.
-     */
-    private activeSessionId;
     /**
      * Switch this route's model: persist per (bot, chat) and, when the route
      * already has a live agent, mutate its selection ref so the next step uses the

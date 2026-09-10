@@ -162,6 +162,24 @@ export class SessionManager {
     return this.storeFor(botId).getChat(routeKey(botId, chatId))?.cwd ?? this.defaultCwd
   }
 
+  /**
+   * The session this chat is currently driving, in priority order: its config
+   * binding, its live binding, then the session id persisted for it.
+   *
+   * The persisted id matters right after a DSH restart: a session chosen from the
+   * menu is stored but not re-registered as a binding, so without this fallback
+   * the 会话 menu would show no ✅ on the conversation that is actually going to
+   * be resumed (it looked like the session was lost, while the id was intact).
+   */
+  activeSessionId(chatId: number, botId: string): string | undefined {
+    const bound = this.getBound(chatId, botId)?.sessionId
+    if (bound !== undefined && bound !== '') return bound
+    const live = this.bindings.get(routeKey(botId, chatId))?.sessionId
+    if (live !== undefined && live !== '') return live
+    const persisted = this.storeFor(botId).getChat(routeKey(botId, chatId))?.sessionId
+    return persisted !== undefined && persisted !== '' ? persisted : undefined
+  }
+
   /** Mark a session id as one this plugin owns or is bound to (event gate). */
   markRelevant(sessionId: string): void {
     this.relevant.add(sessionId)
@@ -226,6 +244,20 @@ export class SessionManager {
     }
     this.bound.set(key, { chatId, botId: owner, sessionId, cwd })
     this.relevant.add(sessionId)
+    // Persist the binding into the owning bot's store. Without this a session
+    // chosen from the menu survived only in memory: after a DSH restart the chat
+    // had no recorded conversation (no ✅ in the list) and the next message would
+    // start a fresh session instead of resuming the chosen conversation.
+    const store = this.storeFor(owner)
+    const stateKey = routeKey(owner, chatId)
+    const current = store.getChat(stateKey)
+    store.setChat(stateKey, {
+      ...(current ?? {}),
+      sessionId,
+      cwd,
+      botId: owner,
+    })
+    store.flush()
     this.logger?.warn(`[tg] bound chat ${key} -> ${sessionId}`)
   }
 
@@ -435,15 +467,6 @@ export class SessionManager {
   }
 
   /**
-   * The session this chat is currently driving: its config binding wins, else its
-   * own live session. Used to resolve the inherited model and to scope model picks.
-   */
-  private activeSessionId(chatId: number, botId: string): string | undefined {
-    return this.getBound(chatId, botId)?.sessionId
-      ?? this.bindings.get(routeKey(botId, chatId))?.sessionId
-  }
-
-  /**
    * Switch this route's model: persist per (bot, chat) and, when the route
    * already has a live agent, mutate its selection ref so the next step uses the
    * new model. Other bots and the GUI are untouched.
@@ -511,7 +534,20 @@ export class SessionManager {
     const model = this.modelFor(chatId, botId)
     let handle: AgentHandle
     let sessionId: string
-    if (mode === 'resume' && persisted !== undefined && persisted.sessionId !== '') {
+    // A persisted session whose agent is ALREADY live in this process (e.g. a GUI
+    // conversation, or a chat binding chosen from the menu before a restart) must
+    // be adopted, never resumed: resuming a live session can fail and the old code
+    // then fell back to a FRESH session, silently discarding the conversation.
+    const liveAgent = mode === 'resume' && persisted !== undefined && persisted.sessionId !== ''
+      ? this.factory.getLive(persisted.sessionId)
+      : undefined
+    if (liveAgent !== undefined && persisted !== undefined) {
+      sessionId = persisted.sessionId
+      // The plugin does not own this agent, so its disposer is a no-op: `/new`
+      // and plugin unload must not tear down someone else's live session.
+      handle = { agent: liveAgent, dispose: async () => {} }
+      this.logger?.warn(`[tg] adopted live session ${sessionId} for ${key}`)
+    } else if (mode === 'resume' && persisted !== undefined && persisted.sessionId !== '') {
       try {
         handle = await this.factory.resume({
           sessionId: persisted.sessionId as SessionId,
