@@ -106,12 +106,14 @@ export function registerInteractions(options: InteractionOptions): InteractionRe
     const token = newQuestionToken()
     const pending = store.create('question', target.chatId, target.botId, timeoutMs)
     if (pending === undefined) return next() // 该聊天已有问题在等 → 交还宿主
+    logger?.warn(`[交互] SeamA fire bot=${target.botId} chat=${target.chatId} token=${token} delivery=${deliveries.has(target.botId)} sigAborted=${request.signal?.aborted}`)
 
     const answer = await new Promise<AskUserQuestionAnswer | undefined>(resolveWait => {
       const onAbort = () => store.finish(pending, undefined)
       request.signal?.addEventListener('abort', onAbort, { once: true })
       pending.resolve = value => {
         request.signal?.removeEventListener('abort', onAbort)
+        logger?.warn(`[交互] SeamA resolved ${value === undefined ? 'undefined(交还)' : 'answer'}`)
         resolveWait(value as AskUserQuestionAnswer | undefined)
       }
       pending.onTimeout = () => {
@@ -120,11 +122,15 @@ export function registerInteractions(options: InteractionOptions): InteractionRe
       try {
         const { text, keyboard } = renderQuestions(request.questions, token)
         pending.meta = questionMetaOf(request.questions, token)
-        void delivery.sendMenu(target.chatId, text, keyboard).catch(() => {
+        void delivery.sendMenu(target.chatId, text, keyboard).then(
+          () => logger?.warn(`[交互] SeamA sendMenu ok`),
+          (e) => logger?.warn(`[交互] SeamA sendMenu FAILED: ${String(e)}`),
+        ).catch(() => {
           store.finish(pending, undefined)
         })
       } catch (error) {
         // 渲染/发送同步异常不得让瀑布停摆：放弃等待并交还宿主。
+        logger?.warn(`[交互] SeamA 同步异常交还: ${String(error)}`)
         store.finish(pending, undefined)
       }
     })
@@ -142,12 +148,14 @@ export function registerInteractions(options: InteractionOptions): InteractionRe
     const token = newApprovalToken()
     const pending = store.create('approval', target.chatId, target.botId, timeoutMs)
     if (pending === undefined) return next() // 该聊天已有审批在等 → 交还宿主
+    logger?.warn(`[交互] SeamB fire bot=${target.botId} chat=${target.chatId} token=${token} delivery=${deliveries.has(target.botId)} sigAborted=${request.signal?.aborted}`)
 
     const outcome = await new Promise<ApprovalOutcome | undefined>(resolveWait => {
       const onAbort = () => store.finish(pending, undefined)
       request.signal?.addEventListener('abort', onAbort, { once: true })
       pending.resolve = value => {
         request.signal?.removeEventListener('abort', onAbort)
+        logger?.warn(`[交互] SeamB resolved ${value === undefined ? 'undefined(交还)' : String(value)}`)
         resolveWait(value as ApprovalOutcome | undefined)
       }
       pending.onTimeout = () => {
@@ -156,11 +164,15 @@ export function registerInteractions(options: InteractionOptions): InteractionRe
       try {
         const { text, keyboard } = renderApproval(request.toolName, request.reason, token, words)
         pending.meta = approvalMetaOf(token, request.toolName, request.reason)
-        void delivery.sendMenu(target.chatId, text, keyboard).catch(() => {
+        void delivery.sendMenu(target.chatId, text, keyboard).then(
+          () => logger?.warn(`[交互] SeamB sendMenu ok`),
+          (e) => logger?.warn(`[交互] SeamB sendMenu FAILED: ${String(e)}`),
+        ).catch(() => {
           store.finish(pending, undefined)
         })
       } catch (error) {
         // 渲染/发送同步异常不得让瀑布停摆：放弃等待并交还宿主。
+        logger?.warn(`[交互] SeamB 同步异常交还: ${String(error)}`)
         store.finish(pending, undefined)
       }
     })
