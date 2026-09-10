@@ -257,25 +257,62 @@ export function apply(ctx: Context, config: TelegramConfig) {
   const deliveries = new Map<string, Delivery>()
   const listener = new StreamListener({ ctx, sessions, deliveries, logger, notifyEnd: config.notifyEnd ?? false })
 
-  /** Read the host session roster (titles/cwd) without exposing it by itself. */
+  /**
+   * Read the host session roster (titles/cwd).
+   *
+   * BOTH sources are always merged, keyed by session id:
+   * - the persisted projection cache is the authority for `cwd` (the menu scopes
+   *   the list by working directory), and
+   * - the typert gateway is the authority for live titles / recency.
+   *
+   * They used to be mutually exclusive, and the gateway wins on web: whenever its
+   * items carried no `cwd`, the directory scope matched nothing, the menu silently
+   * fell back to "all sessions", and switching the working directory looked like a
+   * no-op (the reported bot-a/bot-b asymmetry: the bot whose active session came
+   * from the list looked fine).
+   */
   const hostSessionRoster = async (): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>> => {
-    const out: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }> = []
-    const seen = new Set<string>()
+    interface RosterEntry { id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }
+    const byId = new Map<string, RosterEntry>()
     // Skip sub-agent sessions: they are child turns, not user-facing
     // conversations, so they should not appear in the sessions picker.
     const isSubagent = (s: { origin?: unknown }) => s?.origin === 'subagent'
-    const push = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
-      if (s === undefined || !s.id || seen.has(s.id) || isSubagent(s)) return
-      seen.add(s.id)
-      out.push({
+    /** Merge one entry, letting a later source only FILL gaps (never erase cwd). */
+    const merge = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
+      if (s === undefined || !s.id || isSubagent(s)) return
+      const existing = byId.get(s.id)
+      byId.set(s.id, {
         id: s.id,
-        cwd: s.cwd,
-        title: s.title,
-        displayTitle: s.displayTitle ?? s.title ?? s.id,
-        updatedAt: s.updatedAt ?? 0,
+        cwd: existing?.cwd ?? s.cwd,
+        title: s.title ?? existing?.title,
+        displayTitle: s.displayTitle ?? existing?.displayTitle ?? s.title ?? existing?.title ?? s.id,
+        updatedAt: Math.max(existing?.updatedAt ?? 0, s.updatedAt ?? 0),
       })
     }
-    // 1) Typert gateway RPC: session.list -> { items: [ { sessionId, cwd?,
+    // 1) Persisted projection cache: authoritative for cwd (identity.cwd).
+    try {
+      const sdir = join(dshHome, 'storages', 'session_projcache', 'sessions')
+      for (const name of readdirSync(sdir)) {
+        if (!name.endsWith('.json')) continue
+        let parsed: {
+          record?: {
+            identity?: { cwd?: string; createdAt?: number; origin?: unknown }
+            rows?: {
+              title?: { val?: unknown }
+              sessionListMetadata?: { val?: { lastPromptAt?: number } }
+              modelSelection?: { val?: { next?: unknown; lastUsed?: unknown } }
+            }
+          }
+        } | null
+        try { parsed = JSON.parse(readFileSync(join(sdir, name), 'utf8')) } catch { continue }
+        const rec = parsed?.record
+        const id = name.slice(0, -5)
+        const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
+        const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
+        merge({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt, origin: rec?.identity?.origin })
+      }
+    } catch { /* best-effort: the gateway below may still fill the roster */ }
+    // 2) Typert gateway RPC: session.list -> { items: [ { sessionId, cwd?,
     //    updatedAt, projections: { values: { title } } } ] } (dsh-im's channel).
     try {
       const gw = (ctx.get as (k: string) => unknown)?.('typertGateway') as
@@ -285,35 +322,13 @@ export function apply(ctx: Context, config: TelegramConfig) {
           const value = await gw.invoke({ namespace: ns, method: 'list', args: {} })
           const items = value?.items ?? []
           for (const it of items) {
-            push({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt, origin: it?.origin })
+            merge({ id: it?.sessionId, cwd: it?.cwd, title: it?.projections?.values?.title, updatedAt: it?.updatedAt, origin: it?.origin })
           }
           if (items.length > 0) break
         }
       }
     } catch { /* continue */ }
-    // 2) Direct persistence fallback: read the session cache files so the
-    //    list never empties even when the runtime channel is unavailable.
-    //    Home resolution falls back to `~/.dsh` (same $DSH_HOME caveat as
-    //    listWorkspaces above) so the session roster is still found.
-    if (out.length === 0) {
-      try {
-        const home = process.env.DSH_HOME ?? process.env.DSH_HOME_DIR ?? join(homedir(), '.dsh')
-        if (home !== '') {
-          const sdir = join(home, 'storages', 'session_projcache', 'sessions')
-          for (const name of readdirSync(sdir)) {
-            if (!name.endsWith('.json')) continue
-            let parsed: { record?: { identity?: { cwd?: string; createdAt?: number }; rows?: { title?: { val?: unknown }; sessionListMetadata?: { val?: { lastPromptAt?: number } } } } } | null
-            try { parsed = JSON.parse(readFileSync(join(sdir, name), 'utf8')) } catch { continue }
-            const rec = parsed?.record
-            const id = name.slice(0, -5)
-            const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
-            const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
-            push({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt })
-          }
-        }
-      } catch { /* best-effort */ }
-    }
-    return out
+    return [...byId.values()]
   }
 
   /**
