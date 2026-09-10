@@ -25,6 +25,20 @@ export interface StreamListenerOptions {
      * extra line on clean completions. Interruption causes are always surfaced.
      */
     notifyEnd?: boolean;
+    /**
+     * B (time-based watchdog): while a turn is open, if NO session activity
+     * arrives for this many milliseconds, report a suspected stall to the bot.
+     * Defaults to 120000 (2 min); `0` disables the watchdog. Complements the
+     * event-based A notice (which catches a *deliberate* pause) by also catching
+     * a wedged turn that never reaches a stop boundary.
+     */
+    stallNoticeMs?: number;
+    /**
+     * Quiescence window (ms) before the event-based "waiting for input" notice is
+     * sent. Defaults to 2500: long enough that a normal `turn/end` cancels it,
+     * short enough to feel responsive. Exposed mainly for tests.
+     */
+    waitQuiescenceMs?: number;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -45,8 +59,39 @@ export declare class StreamListener {
      * turn numbers are monotonic within a session and reset across `/new`.
      */
     private readonly terminalReported;
+    /**
+     * "等待输入" detection: DSH surface event vocabulary has no "waiting for the
+     * user" event. The closest signal is `agent/turn-stopping` (the agent reached
+     * its stop boundary and is about to hand control back), but that also fires
+     * right before a normal `turn/end`. We therefore delay the "waiting" line by a
+     * short quiescence window: if NO session activity arrives for the session
+     * within that window, the agent is genuinely paused waiting for input, so the
+     * bot gets an explicit "⏳ 等待你的回复…" instead of appearing stalled. Any
+     * chunk/step/turn/assistant activity cancels the pending notice.
+     */
+    private readonly pendingWait;
+    /**
+     * B (watchdog): per-session timer armed while a turn is open. Any session
+     * activity resets it; firing means the turn produced nothing for
+     * `stallNoticeMs`. `openTurn` records the turn number so a stale timer can be
+     * ignored, and `stallNotified` ensures at most one stall line per turn.
+     */
+    private readonly stallWatch;
+    private readonly openTurn;
+    private readonly stallNotified;
+    /** Watchdog window in ms; 0 disables the time-based stall notice. */
+    private readonly stallNoticeMs;
+    /** Quiescence window (ms) for the event-based "waiting" notice. */
+    private readonly waitQuiescenceMs;
     constructor(options: StreamListenerOptions);
     start(): void;
+    /**
+     * A (event-based) "waiting for user" notice. Arms a short quiescence window:
+     * if no session activity arrives before it elapses, the agent is paused on
+     * user input and the bot is told so. Re-arming replaces the previous timer, so
+     * repeated stop/idle signals cannot stack notices.
+     */
+    private armWaitNotice;
     stop(): void;
     private handle;
     /**
@@ -58,6 +103,12 @@ export declare class StreamListener {
      * bot explicitly opted into `allowSharedSessions`, and is logged as such.
      */
     private resolveRoutes;
+    /** Cancel a pending "waiting for input" notice (session became active again). */
+    private cancelPendingWait;
+    /** B: (re)arm the stall watchdog for an open turn. No-op when disabled. */
+    private armStallWatch;
+    /** B: clear the stall watchdog (turn closed, or a newer turn took over). */
+    private cancelStallWatch;
     /** End the live segment and report an agent-level failure to the bot. */
     private applyAgentFailure;
     /** Apply one normalized message to the chat's delivery. */

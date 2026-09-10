@@ -255,7 +255,14 @@ export function apply(ctx: Context, config: TelegramConfig) {
 
   // Stream listener: routes session events to the right bot's delivery.
   const deliveries = new Map<string, Delivery>()
-  const listener = new StreamListener({ ctx, sessions, deliveries, logger, notifyEnd: config.notifyEnd ?? false })
+  const listener = new StreamListener({
+    ctx,
+    sessions,
+    deliveries,
+    logger,
+    notifyEnd: config.notifyEnd ?? true,
+    stallNoticeMs: config.stallNoticeMs ?? 120000,
+  })
 
   /**
    * Read the host session roster (titles/cwd).

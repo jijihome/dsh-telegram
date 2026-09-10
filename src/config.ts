@@ -82,6 +82,12 @@ export interface TelegramConfig {
    * (cancel/error/blocked/max-tokens/interrupted) are ALWAYS surfaced regardless.
    */
   notifyEnd?: boolean
+  /**
+   * Time-based stall watchdog: while a turn is open, report to the bot if no
+   * output arrives for this many milliseconds. Default 120000 (2 min); `0`
+   * disables it. The event-based "waiting for input" notice is always on.
+   */
+  stallNoticeMs?: number
   /** Base working directory roots for /workspace browsing. Defaults to process.cwd(). */
   workspaceRoots?: string[]
   /** Directory for persistent state (chat↔session map, offsets). Default: <cwd>/data. */
@@ -136,6 +142,7 @@ export const Config: Schema<TelegramConfig> = Schema.object({
   maxMessageLength: Schema.number().default(4096),
   pollingTimeoutSec: Schema.number().default(30),
   notifyEnd: Schema.boolean().default(true),
+  stallNoticeMs: Schema.number().default(120000),
   workspaceRoots: Schema.array(Schema.string()),
   dataDir: Schema.string(),
   proxy: Schema.string(),
