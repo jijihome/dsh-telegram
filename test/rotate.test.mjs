@@ -109,3 +109,35 @@ test('清除会话确认文案同样含 工作目录', async () => {
   // 没有旧会话时不显示「已丢弃」
   assert.ok(!res.text.includes('已丢弃'), '无旧会话时不应出现「已丢弃」')
 })
+
+test('宿主已占用同名会话时自动换下一个候选(重启后 generation 归零) —— 回归', async () => {
+  const env = makeEnv()
+  // 宿主已有 base 与 g1；内存绑定为空(模拟刚重启, generation 从 0 → 1 即先试 g1)
+  const taken = new Set(['telegram:bot-a:42', 'telegram:bot-a:42:g1'])
+  const requested = []
+  const handleFor = (id) => ({
+    agent: { session: { id }, status: 'idle', followup() {}, cancel() {} },
+    async dispose() {},
+  })
+  const factory = {
+    requested,
+    async create(request) {
+      const id = String(request.sessionId)
+      requested.push(id)
+      if (taken.has(id)) {
+        const error = new Error(`session "${id}" already exists`)
+        error.name = 'SessionAlreadyExistsError'
+        throw error
+      }
+      return handleFor(id)
+    },
+    async resume(request) { return handleFor(String(request.sessionId)) },
+    getLive() { return undefined },
+  }
+  const sessions = new SessionManager({ factory, stores: env.stores, scopes: env.scopeById, defaultCwd: 'E:/ws', logger: silent })
+
+  const binding = await sessions.rotate(42, 'bot-a')
+
+  assert.equal(binding.sessionId, 'telegram:bot-a:42:g2', '应跳过宿主已占用的 g1, 改用 g2')
+  assert.deepEqual(requested, ['telegram:bot-a:42:g1', 'telegram:bot-a:42:g2'], '先试 g1, 冲突后改试 g2')
+})

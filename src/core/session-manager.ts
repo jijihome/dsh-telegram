@@ -120,6 +120,17 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * True when the host refused a session id because that session already exists on
+ * disk (typically one minted by an earlier host run, invisible to our in-memory
+ * generation counter). Matched by error name first, message as a fallback.
+ */
+function isSessionAlreadyExists(error: unknown): boolean {
+  const name = (error as { name?: unknown } | undefined)?.name
+  if (name === 'SessionAlreadyExistsError') return true
+  return /already exists/i.test(messageOf(error))
+}
+
 /** Manages per-(bot, chat) agent sessions. */
 export class SessionManager {
   private readonly factory: AgentFactoryLike
@@ -599,16 +610,14 @@ export class SessionManager {
       } catch (error) {
         // Persisted session no longer available: fall through to a fresh create.
         this.logger?.warn(`[tg] resume failed for ${key}: ${messageOf(error)}; creating fresh`)
-        sessionId = this.uniqueSessionId(botId, chatId, generation)
-        handle = await this.factory.create({
-          sessionId: SessionId(sessionId), cwd, provider: model.provider, model: model.model, routeKey: key,
-        })
+        const fresh = await this.createFresh(key, chatId, botId, cwd, generation, model)
+        handle = fresh.handle
+        sessionId = fresh.sessionId
       }
     } else {
-      sessionId = this.uniqueSessionId(botId, chatId, generation)
-      handle = await this.factory.create({
-        sessionId: SessionId(sessionId), cwd, provider: model.provider, model: model.model, routeKey: key,
-      })
+      const fresh = await this.createFresh(key, chatId, botId, cwd, generation, model)
+      handle = fresh.handle
+      sessionId = fresh.sessionId
     }
     store.setChat(key, {
       ...(persisted ?? {}),
@@ -627,18 +636,50 @@ export class SessionManager {
   }
 
   /**
-   * A session id that no live agent, binding or persisted record is using.
-   * `/new` must never collide with a previous generation, otherwise the host
-   * would resurrect the old conversation instead of starting a clean one.
+   * Create a fresh agent, skipping session ids the HOST already owns.
+   *
+   * The in-memory generation counter and {@link isSessionIdTaken} cannot see
+   * sessions persisted by an EARLIER host run (generation is not durable, and the
+   * per-chat state only records the latest id). After a restart the next `g<N>`
+   * can therefore collide with an existing session and `agents.create` rejects
+   * with SessionAlreadyExistsError. Retry with the next candidate until the host
+   * accepts one — self-healing without needing a durable counter.
    */
-  private uniqueSessionId(botId: string, chatId: number, generation: number): string {
-    const base = `telegram:${botId}:${chatId}`
+  private async createFresh(
+    key: string,
+    chatId: number,
+    botId: string,
+    cwd: string,
+    generation: number,
+    model: { provider: string; model: string },
+  ): Promise<{ handle: AgentHandle; sessionId: string }> {
     let n = generation
-    for (;;) {
-      const candidate = n === 0 ? base : `${base}:g${n}`
-      if (!this.isSessionIdTaken(botId, candidate)) return candidate
-      n += 1
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const candidate = this.candidateSessionId(botId, chatId, n)
+      if (this.isSessionIdTaken(botId, candidate)) {
+        n += 1
+        continue
+      }
+      try {
+        const handle = await this.factory.create({
+          sessionId: SessionId(candidate), cwd, provider: model.provider, model: model.model, routeKey: key,
+        })
+        return { handle, sessionId: sessionIdOf(handle) || candidate }
+      } catch (error) {
+        if (!isSessionAlreadyExists(error)) throw error
+        this.logger?.warn(`[tg] session id ${candidate} 已存在于宿主,改试下一个候选`)
+        n += 1
+      }
     }
+    throw new Error(
+      `dsh-telegram: 连续 50 个候选 session id 都与宿主已有会话冲突(bot=${botId} chat=${chatId})`,
+    )
+  }
+
+  /** Candidate fresh-session id for generation `n`: `telegram:<bot>:<chat>[:g<n>]`. */
+  private candidateSessionId(botId: string, chatId: number, n: number): string {
+    const base = `telegram:${botId}:${chatId}`
+    return n === 0 ? base : `${base}:g${n}`
   }
 
   private isSessionIdTaken(botId: string, sessionId: string): boolean {

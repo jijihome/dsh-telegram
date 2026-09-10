@@ -255,10 +255,17 @@ export declare class SessionManager {
     /** Create a fresh session (mode `fresh`) or resume the persisted one. */
     private create;
     /**
-     * A session id that no live agent, binding or persisted record is using.
-     * `/new` must never collide with a previous generation, otherwise the host
-     * would resurrect the old conversation instead of starting a clean one.
+     * Create a fresh agent, skipping session ids the HOST already owns.
+     *
+     * The in-memory generation counter and {@link isSessionIdTaken} cannot see
+     * sessions persisted by an EARLIER host run (generation is not durable, and the
+     * per-chat state only records the latest id). After a restart the next `g<N>`
+     * can therefore collide with an existing session and `agents.create` rejects
+     * with SessionAlreadyExistsError. Retry with the next candidate until the host
+     * accepts one — self-healing without needing a durable counter.
      */
-    private uniqueSessionId;
+    private createFresh;
+    /** Candidate fresh-session id for generation `n`: `telegram:<bot>:<chat>[:g<n>]`. */
+    private candidateSessionId;
     private isSessionIdTaken;
 }
