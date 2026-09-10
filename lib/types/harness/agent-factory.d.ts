@@ -50,6 +50,11 @@ export interface AgentFactoryLike {
      * no agent yet (the caller's persisted choice applies at the next create).
      */
     setSelection(routeKey: string, selection: ModelSelection): boolean;
+    /**
+     * Model recorded on a live session's own `modelSelection` projection — the
+     * model that conversation continues with. Optional: stubs may omit it.
+     */
+    sessionSelection?(sessionId: string): ModelSelection | undefined;
 }
 /** Session id of a live agent handle, or '' when it cannot be read. */
 export declare function sessionIdOf(handle: AgentHandle): string;
@@ -66,6 +71,13 @@ export declare class DshAgentFactory implements AgentFactoryLike {
     resume(request: AgentResumeRequest): Promise<AgentHandle>;
     /** Live agent lookup: the registry keeps one agent per session id. */
     getLive(sessionId: string): Agent | undefined;
+    /**
+     * The model a live session is actually continuing with, read from its
+     * `modelSelection` projection (`pending` wins over `lastUsed`). Used so a chat
+     * that was switched onto an existing conversation reports — and continues on —
+     * that conversation's model instead of the deployment default.
+     */
+    sessionSelection(sessionId: string): ModelSelection | undefined;
     /** Switch a route's model; applies to the next step when an agent is live. */
     setSelection(routeKey: string, selection: ModelSelection): boolean;
     /** Current selection of a route (diagnostics / menus). */

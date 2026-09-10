@@ -27,6 +27,11 @@ export interface MenuCtx {
   /** Whether the current user is allowed to run ops (restart dsh). */
   canOperate: boolean
   getCurrentModel(): { provider: string; model: string }
+  /**
+   * Effective model plus its source (`chat` / `session` / `host` / `bot`), so the
+   * status panel can show that the model is inherited from the current session.
+   */
+  getModelInfo?(): { provider: string; model: string; source: 'chat' | 'session' | 'host' | 'bot' }
   listModels(): Promise<Array<{ provider: string; model: string }>>
   setModel(provider: string, model: string): Promise<void>
   listPresets(): Promise<Array<{ id: string; name: string }>>
@@ -175,8 +180,20 @@ async function statusText(ctx: MenuCtx): Promise<string> {
   }
   lines.push(`• 工作目录: ${cwd}`)
   lines.push(`• 工作方式: ${workMode}`)
-  lines.push(`• 模型: ${model.provider}/${model.model}`)
+  const info = ctx.getModelInfo?.()
+  lines.push(`• 模型: ${model.provider}/${model.model}${modelSourceLabel(info?.source)}`)
   return lines.join('\n')
+}
+
+/** Chinese label for a model's source, shown next to the model in the status panel. */
+function modelSourceLabel(source: 'chat' | 'session' | 'host' | 'bot' | undefined): string {
+  switch (source) {
+    case 'chat': return '(本会话已选)'
+    case 'session': return '(继承当前会话)'
+    case 'host': return '(跟随宿主默认)'
+    case 'bot': return '(Bot 固定)'
+    default: return ''
+  }
 }
 
 /** Workspace submenu: list all known working directories. */

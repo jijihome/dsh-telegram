@@ -28,6 +28,15 @@ export interface MenuCtx {
         provider: string;
         model: string;
     };
+    /**
+     * Effective model plus its source (`chat` / `session` / `host` / `bot`), so the
+     * status panel can show that the model is inherited from the current session.
+     */
+    getModelInfo?(): {
+        provider: string;
+        model: string;
+        source: 'chat' | 'session' | 'host' | 'bot';
+    };
     listModels(): Promise<Array<{
         provider: string;
         model: string;

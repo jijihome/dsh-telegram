@@ -55,6 +55,20 @@ export interface AgentFactoryLike {
    * no agent yet (the caller's persisted choice applies at the next create).
    */
   setSelection(routeKey: string, selection: ModelSelection): boolean
+  /**
+   * Model recorded on a live session's own `modelSelection` projection — the
+   * model that conversation continues with. Optional: stubs may omit it.
+   */
+  sessionSelection?(sessionId: string): ModelSelection | undefined
+}
+
+/** Normalize an unknown projection value into a usable selection. */
+function normalizeSelection(value: unknown): ModelSelection | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const record = value as { provider?: unknown; model?: unknown }
+  if (typeof record.provider !== 'string' || record.provider === '') return undefined
+  if (typeof record.model !== 'string' || record.model === '') return undefined
+  return { provider: record.provider, model: record.model }
 }
 
 /** Session id of a live agent handle, or '' when it cannot be read. */
@@ -107,6 +121,25 @@ export class DshAgentFactory implements AgentFactoryLike {
   getLive(sessionId: string): Agent | undefined {
     const registry = this.ctx.agents as unknown as { get(id: string): Agent | undefined }
     return registry.get(sessionId)
+  }
+
+  /**
+   * The model a live session is actually continuing with, read from its
+   * `modelSelection` projection (`pending` wins over `lastUsed`). Used so a chat
+   * that was switched onto an existing conversation reports — and continues on —
+   * that conversation's model instead of the deployment default.
+   */
+  sessionSelection(sessionId: string): ModelSelection | undefined {
+    const agent = this.getLive(sessionId)
+    if (agent === undefined) return undefined
+    try {
+      const projections = (this.ctx.get as (key: string) => unknown)?.('sessionProjections') as
+        { stateOf?(session: unknown, key: string): { lastUsed?: unknown; pending?: unknown } | undefined } | undefined
+      const state = projections?.stateOf?.(agent.session, 'modelSelection')
+      return normalizeSelection(state?.pending) ?? normalizeSelection(state?.lastUsed)
+    } catch {
+      return undefined
+    }
   }
 
   /** Switch a route's model; applies to the next step when an agent is live. */

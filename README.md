@@ -85,13 +85,14 @@ dsh --profile <name> --dump-config | grep telegram
 | 隔离面 | 行为 |
 | --- | --- |
 | 身份 | `botId` 必须唯一且不含 `:`;`token` 必须唯一(共用 token 会互抢 getUpdates)。违反则**启动即失败**,不做 last-wins 覆盖 |
-| 模型 | 解析顺序:① 该 chat 在菜单里选过的模型(存 `botId:chatId`)→ ② **未固定模型的 Bot 跟随宿主默认模型**(只读 `agentDefaultModel`,与 GUI 同一个默认,保证继续会话)→ ③ Bot 在配置里固定的 `provider/model`。菜单切换热切换该路由的 agent;**从不写入宿主全局**,不影响其他 Bot 与 GUI |
+| 模型 | 解析顺序:① 本会话在菜单里选过的模型(仅对该会话有效,存 `botId:chatId`)→ ② **当前会话自己记录的模型**(`modelSelection`,即切换会话后继承的那个模型)→ ③ **未固定模型的 Bot 跟随宿主默认模型**(只读 `<DSH_HOME>/settings.yaml` 的 `agent-default-model`,与 GUI 同一个默认)→ ④ Bot 固定的 `provider/model`。状态面板会标注来源(本会话已选/继承当前会话/跟随宿主默认/Bot 固定);菜单切换热切换该路由的 agent;**从不写入宿主全局**,不影响其他 Bot 与 GUI |
+| 配置数组字段 | per-bot 的 `allowedUserIds` / `workspaceRoots` 若为空数组视为「未设置」,继承插件级同名配置(schema 会把缺失的 per-bot 数组物化为 `[]`,若不这样处理会静默丢掉插件级白名单与工作区根) |
 | 会话归属 | 一个 DSH 会话只能属于一个「Bot+chat」路由;重复绑定直接报错(除非相关 Bot 都设 `allowSharedSessions: true`) |
 | 出站路由 | 事件按 sessionId 反查唯一路由;非本插件会话 O(1) 丢弃,不存在跨 Bot 扇出 |
 | 入站绑定 | 裸 `chatId` 绑定仅在**单 Bot** 下可用;多 Bot 下写裸键会启动失败(必须写 `<botId>:<chatId>`) |
 | `/new` | 一定新建全新 session(不 resume 旧会话),并解除该 chat 的配置绑定 |
 | 状态 | 每 Bot 一个 `state.json`,store 带跨 Bot 键守卫(越界即抛错);forward 日志在各自目录 |
-| 可见性 | 会话/工作区菜单默认只显示本 Bot 拥有的会话;要看到宿主全部会话需显式 `allowHostSessions: true` |
+| 可见性 | 会话/工作区菜单默认只显示本 Bot 拥有的会话;要像以前一样看到宿主全部工作区与会话,显式设置 `allowHostSessions: true` |
 | 运维 | 「重启 DSH」默认仅单 Bot 可用;多 Bot 下需给该 Bot 显式 `allowOpsRestart: true`(重启会停掉所有 Bot) |
 | 故障 | 仍共享一个宿主进程:Bot 连接与投递已隔离,但宿主崩溃/OOM/事件循环阻塞仍是共同风险。需要硬隔离请让每个 Bot 跑独立 `DSH_HOME`/profile |
 

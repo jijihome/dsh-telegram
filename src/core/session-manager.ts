@@ -74,6 +74,24 @@ export interface SessionManagerOptions {
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
+/** Where an effective model came from, for display and debugging. */
+export type ModelSource =
+  /** The user picked it in the model menu, for the current session. */
+  | 'chat'
+  /** Inherited from the active session's own recorded model. */
+  | 'session'
+  /** The deployment default (`agent-default-model`), read-only. */
+  | 'host'
+  /** This bot's pinned/fallback value. */
+  | 'bot'
+
+/** Effective model for one route plus its source. */
+export interface ModelInfo {
+  provider: string
+  model: string
+  source: ModelSource
+}
+
 /** Stable message text for logging. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -373,31 +391,77 @@ export class SessionManager {
    * so one bot's model choice can never leak into another bot or the GUI.
    */
   modelFor(chatId: number, botId: string): { provider: string; model: string } {
+    const info = this.modelInfo(chatId, botId)
+    return { provider: info.provider, model: info.model }
+  }
+
+  /**
+   * Effective model plus where it came from, in strict priority order:
+   *
+   * 1. `chat` — the user picked it in the model menu, and only for the session it
+   *    was picked on (a stale pick must not masquerade as another session's model);
+   * 2. `session` — the model the active session itself is continuing with
+   *    (`modelSelection` projection), i.e. the inherited conversation model;
+   * 3. `host` — the deployment default (`agent-default-model`), read-only;
+   * 4. `bot` — this bot's pinned/fallback value.
+   *
+   * The host-global selection is only ever READ; the plugin never writes it.
+   */
+  modelInfo(chatId: number, botId: string): ModelInfo {
     const scope = this.scopeOf(botId)
     const state = this.storeFor(botId).getChat(routeKey(botId, chatId))
+    const active = this.activeSessionId(chatId, botId)
     if (state?.provider !== undefined && state.model !== undefined) {
-      return { provider: state.provider, model: state.model }
+      const sameSession = state.modelSessionId === undefined || active === undefined || state.modelSessionId === active
+      if (sameSession) return { provider: state.provider, model: state.model, source: 'chat' }
+    }
+    if (active !== undefined) {
+      const inherited = this.factory.sessionSelection?.(active)
+      if (inherited !== undefined && inherited.provider !== '' && inherited.model !== '') {
+        return { provider: inherited.provider, model: inherited.model, source: 'session' }
+      }
     }
     if (!scope.modelPinned) {
       const host = this.defaultSelection?.()
-      if (host !== undefined && host.provider !== '' && host.model !== '') return host
+      if (host !== undefined && host.provider !== '' && host.model !== '') {
+        return { provider: host.provider, model: host.model, source: 'host' }
+      }
     }
     return {
       provider: state?.provider ?? scope.provider,
       model: state?.model ?? scope.model,
+      source: 'bot',
     }
+  }
+
+  /**
+   * The session this chat is currently driving: its config binding wins, else its
+   * own live session. Used to resolve the inherited model and to scope model picks.
+   */
+  private activeSessionId(chatId: number, botId: string): string | undefined {
+    return this.getBound(chatId, botId)?.sessionId
+      ?? this.bindings.get(routeKey(botId, chatId))?.sessionId
   }
 
   /**
    * Switch this route's model: persist per (bot, chat) and, when the route
    * already has a live agent, mutate its selection ref so the next step uses the
    * new model. Other bots and the GUI are untouched.
+   *
+   * The pick is recorded together with the session it was made on, so switching
+   * this chat to another conversation shows that conversation's own model again.
    */
   setModel(chatId: number, botId: string, provider: string, model: string): boolean {
     const key = routeKey(botId, chatId)
     const store = this.storeFor(botId)
     const current = store.getChat(key)
-    store.setChat(key, { ...(current ?? { sessionId: '', cwd: this.defaultCwd, botId }), provider, model } as ChatState)
+    const active = this.activeSessionId(chatId, botId)
+    store.setChat(key, {
+      ...(current ?? { sessionId: active ?? '', cwd: this.defaultCwd, botId }),
+      provider,
+      model,
+      ...(active !== undefined ? { modelSessionId: active } : {}),
+    } as ChatState)
     store.flush()
     const binding = this.bindings.get(key)
     if (binding !== undefined) {

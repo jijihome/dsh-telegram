@@ -40,11 +40,12 @@ function makeEnv({ bots = TWO_BOTS, config = {} } = {}) {
 }
 
 /** Minimal agent registry stub: records requests, returns handles. */
-function fakeFactory({ realSessionId } = {}) {
+function fakeFactory({ realSessionId, sessionModels } = {}) {
   const requests = []
   const selections = new Map()
   const disposals = []
   const live = new Map()
+  const sessionSelectionCalls = []
   const handleFor = (id, label) => ({
     agent: {
       session: { id },
@@ -58,6 +59,7 @@ function fakeFactory({ realSessionId } = {}) {
     requests,
     selections,
     disposals,
+    sessionSelectionCalls,
     async create(request) {
       requests.push({ kind: 'create', ...request })
       const id = String(request.sessionId)
@@ -77,6 +79,11 @@ function fakeFactory({ realSessionId } = {}) {
       const known = selections.has(key) || requests.some(r => r.routeKey === key)
       selections.set(key, selection)
       return known
+    },
+    /** Model recorded on an existing conversation (the "inherited" model). */
+    sessionSelection(id) {
+      sessionSelectionCalls.push(id)
+      return sessionModels?.[id]
     },
   }
 }
@@ -596,4 +603,49 @@ test('an explicit per-bot list overrides the plugin list, an empty one never win
   assert.deepEqual(a.workspaceRoots, ['E:/a'])
   assert.deepEqual(b.allowedUserIds, [222], 'empty per-bot list inherits instead of locking everyone out')
   assert.deepEqual(b.workspaceRoots, ['E:/plugin'], 'empty per-bot roots inherit the plugin roots')
+})
+
+test('after switching sessions the status shows the model that conversation inherits', () => {
+  const env = makeEnv()
+  const factory = fakeFactory({
+    sessionModels: {
+      'session-A': { provider: 'cmd', model: 'm-A' },
+      'session-B': { provider: 'cmd', model: 'm-B' },
+    },
+  })
+  const manager = makeManager(env, factory, 'E:/ws', () => ({ provider: 'host-prov', model: 'host-model' }))
+  manager.bind(5, 'bot-a', 'session-A', 'E:/ws')
+  assert.deepEqual(manager.modelInfo(5, 'bot-a'), { provider: 'cmd', model: 'm-A', source: 'session' })
+
+  // An explicit pick applies to the session it was made on.
+  manager.setModel(5, 'bot-a', 'picked', 'picked-model')
+  assert.deepEqual(manager.modelInfo(5, 'bot-a'), { provider: 'picked', model: 'picked-model', source: 'chat' })
+
+  // Switching to another conversation must surface THAT conversation's model
+  // instead of the stale pick (this was the reported display bug).
+  manager.bind(5, 'bot-a', 'session-B', 'E:/ws')
+  assert.deepEqual(manager.modelInfo(5, 'bot-a'), { provider: 'cmd', model: 'm-B', source: 'session' })
+  assert.deepEqual(manager.modelFor(5, 'bot-a'), { provider: 'cmd', model: 'm-B' })
+})
+
+test('with no session model the status falls back to host default, then the bot value', () => {
+  const env = makeEnv()
+  const withHost = makeManager(env, fakeFactory(), 'E:/ws', () => ({ provider: 'host-prov', model: 'host-model' }))
+  assert.deepEqual(withHost.modelInfo(9, 'bot-a'), { provider: 'host-prov', model: 'host-model', source: 'host' })
+
+  const noHost = makeManager(env, fakeFactory(), 'E:/ws', () => undefined)
+  assert.deepEqual(noHost.modelInfo(9, 'bot-a'), {
+    provider: 'deepseek-official',
+    model: 'deepseek-v4-flash',
+    source: 'bot',
+  })
+})
+
+test('a fresh session keeps using the route selection, not a foreign session model', async () => {
+  const env = makeEnv()
+  const factory = fakeFactory({ sessionModels: { 'session-other': { provider: 'cmd', model: 'm-other' } } })
+  const manager = makeManager(env, factory, 'E:/ws', () => ({ provider: 'host-prov', model: 'host-model' }))
+  const binding = await manager.getOrCreate(5, 'bot-a')
+  assert.notEqual(binding.sessionId, 'session-other')
+  assert.deepEqual(manager.modelInfo(5, 'bot-a'), { provider: 'host-prov', model: 'host-model', source: 'host' })
 })

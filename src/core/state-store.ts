@@ -29,6 +29,12 @@ export interface ChatState {
   provider?: string
   /** Per-chat model id override; falls back to the owning bot's default. */
   model?: string
+  /**
+   * Session the model override was chosen on. The override applies only while
+   * this chat still drives that session, so switching to another conversation
+   * surfaces that conversation's own (inherited) model again.
+   */
+  modelSessionId?: string
   /** Per-chat work-mode preset id (applied when a fresh session is created). */
   agentPreset?: string
 }

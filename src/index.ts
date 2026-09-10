@@ -301,6 +301,9 @@ export function apply(ctx: Context, config: TelegramConfig) {
         }
       },
       getCurrentModel: () => sessions.modelFor(chatId, botId),
+      // Source-aware view for the status panel: after switching sessions the model
+      // shown is the one that conversation continues with, not a stale pick.
+      getModelInfo: () => sessions.modelInfo(chatId, botId),
       listModels: async () => {
         const llm = (ctx.get as (k: string) => unknown)?.('llm') as
           { listProviders?(): Promise<Array<{ id?: string; name?: string }>>; listModels?(provider: string): Promise<Array<{ provider?: string; id?: string; name?: string }>> } | undefined
