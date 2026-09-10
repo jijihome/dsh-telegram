@@ -299,7 +299,7 @@ function samePath(a: string | undefined, b: string | undefined): boolean {
   return norm(a) === norm(b)
 }
 
-/** Model submenu: dynamic list of available models. */
+/** Model submenu: grouped text list with unique序号 + numbered buttons. */
 async function doModel(ctx: MenuCtx): Promise<MenuResult> {
   const current = ctx.getCurrentModel()
   let models: Array<{ provider: string; model: string }>
@@ -308,16 +308,44 @@ async function doModel(ctx: MenuCtx): Promise<MenuResult> {
   } catch {
     models = [{ provider: ctx.provider, model: ctx.model }]
   }
-  const rows: Array<Array<[string, string]>> = []
-  for (const m of models.slice(0, 15)) {
-    const sel = m.provider === current.provider && m.model === current.model
-    rows.push([[
-      `${sel ? '\u2705 ' : ''}${m.model}`,
-      `model:${m.provider}:${m.model}`,
-    ]])
+  const CAP = 40
+  const shown = models.slice(0, CAP)
+  const isCurrent = (m: { provider: string; model: string }) =>
+    m.provider === current.provider && m.model === current.model
+  const CHECK = '\u2705'
+
+  // 全局唯一序号（1..N，按 listModels 返回顺序）。
+  const line: Array<[string, { provider: string; model: string }]> = shown.map((m, i) => [`${i + 1}. ${isCurrent(m) ? CHECK + ' ' : ''}${m.model}`, m])
+
+  // 上方文字：按 provider 分组展示全部模型 + 唯一序号。
+  const textLines = [`🤖 选择模型(当前 ${current.model};仅影响本 Bot 的这个会话):`]
+  const groups = new Map<string, typeof line>()
+  for (const [label, m] of line) {
+    const list = groups.get(m.provider) ?? []
+    list.push([label, m])
+    groups.set(m.provider, list)
   }
+  for (const [provider, items] of groups) {
+    textLines.push(`${provider || '(未知Provider)'}:`)
+    for (const [label] of items) textLines.push(`　${label}`)
+  }
+  if (models.length > CAP) textLines.push(`…(共 ${models.length} 个,仅显示前 ${CAP})`)
+
+  // 下方按钮：只放序号（现行模型带 ✅），每行 5 个；callback 仍为 model:<provider>:<model>。
+  const rows: Array<Array<[string, string]>> = []
+  let row: Array<[string, string]> = []
+  shown.forEach((m, i) => {
+    const btnLabel = `${isCurrent(m) ? CHECK + ' ' : ''}${i + 1}`
+    row.push([btnLabel, `model:${m.provider}:${m.model}`])
+    if (row.length === 5) {
+      rows.push(row)
+      row = []
+    }
+  })
+  if (row.length > 0) rows.push(row)
+
   return {
-    text: `🤖 选择模型(当前 ${current.model};仅影响本 Bot 的这个会话):`,
+    text: textLines.join('\n'),
     keyboard: withBack(rows),
   }
 }
