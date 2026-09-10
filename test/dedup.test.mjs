@@ -100,17 +100,7 @@ test('turn/end(aborted) alone produces a bot notification (previously swallowed 
   assert.equal(delivery.sent[0], '⛔ 已取消: 用户 /stop 取消')
 })
 
-test('turn/end(completed) still ends the live stream, no terminal message', () => {
-  const { ctx, delivery } = build()
-  const sessionEvent = ctx.handlers['session/event']
-
-  sessionEvent(SESSION, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
-
-  assert.equal(delivery.sent.length, 0)
-  assert.equal(delivery.ended(), 1, 'endLive should flush the live segment on completion')
-})
-
-test('turn/end(completed) with notifyEnd sends an explicit done line', async () => {
+test('turn/end(completed) with notifyEnd=false ends live stream, no terminal message', () => {
   const ctx = fakeCtx()
   const delivery = fakeDelivery()
   const deliveries = new Map([['bot-a', delivery]])
@@ -118,7 +108,26 @@ test('turn/end(completed) with notifyEnd sends an explicit done line', async () 
     ctx,
     sessions: fakeSessions(10, 'bot-a'),
     deliveries,
-    notifyEnd: true,
+    notifyEnd: false,
+    logger: { warn() {}, error() {} },
+  })
+  listener.start()
+  ctx.handlers['session/event']({ id: 'telegram:bot-a:10' }, {
+    type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } },
+  })
+
+  assert.equal(delivery.sent.length, 0)
+  assert.equal(delivery.ended(), 1, 'endLive should flush the live segment on completion')
+})
+
+test('turn/end(completed) sends a done line by default (notifyEnd defaults true)', async () => {
+  const ctx = fakeCtx()
+  const delivery = fakeDelivery()
+  const deliveries = new Map([['bot-a', delivery]])
+  const listener = new StreamListener({
+    ctx,
+    sessions: fakeSessions(10, 'bot-a'),
+    deliveries,
     logger: { warn() {}, error() {} },
   })
   listener.start()
@@ -128,7 +137,7 @@ test('turn/end(completed) with notifyEnd sends an explicit done line', async () 
   })
   await flush()
 
-  assert.equal(delivery.sent.length, 1, 'notifyEnd adds a visible done line')
+  assert.equal(delivery.sent.length, 1, 'default notifyEnd adds a visible done line')
   assert.equal(delivery.sent[0], '✅ 完成')
 })
 

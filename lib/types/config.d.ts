@@ -74,9 +74,9 @@ export interface TelegramConfig {
     pollingTimeoutSec?: number;
     /**
      * Send a visible "✅ 完成" line when a turn ends normally (in addition to the
-     * streamed live answer). Off by default: a clean completion already closes the
-     * streamed message, so this only adds explicit end feedback. Interruption
-     * causes (cancel/error/blocked/max-tokens/interrupted) are ALWAYS surfaced.
+     * streamed live answer). On by default so the bot always knows a session ended;
+     * set `false` to stop the extra line on clean completions. Interruption causes
+     * (cancel/error/blocked/max-tokens/interrupted) are ALWAYS surfaced regardless.
      */
     notifyEnd?: boolean;
     /** Base working directory roots for /workspace browsing. Defaults to process.cwd(). */

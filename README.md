@@ -67,7 +67,7 @@ dsh --profile <name> --dump-config | grep telegram
 | `provider` / `model` | 未设置 = 跟随宿主默认模型 | 各 Bot 的默认 LLM 选择;设置后为固定值(可按 Bot 覆盖) |
 | `maxMessageLength` | `4096` | 消息长度上限 |
 | `pollingTimeoutSec` | `30` | 长轮询超时(秒) |
-| `notifyEnd` | `false` | 回合**自然结束(成功完成)**时额外发一条可见的「✅ 完成」。中断类原因(cancel/error/blocked/max-tokens/interrupted)无论开关**始终**通知 |
+| `notifyEnd` | `true` | 回合**自然结束(成功完成)**时额外发一条可见的「✅ 完成」。中断类原因(cancel/error/blocked/max-tokens/interrupted)无论开关**始终**通知;设为 `false` 则成功完成时不发额外行 |
 | `workspaceRoots` | `[cwd]` | /workspace 可浏览的根目录 |
 | `dataDir` | `<DSH_HOME>/plugin-data/dsh-telegram` | 每 Bot 状态根目录(实际写入 `<dataDir>/bots/<botId>/`) |
 | `allowHostSessions` | `false` | 是否允许各 Bot 枚举/附加宿主的全部会话与工作区 |

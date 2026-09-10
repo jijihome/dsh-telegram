@@ -26,9 +26,9 @@ export interface StreamListenerOptions {
   /** One delivery per bot, keyed by bot id. */
   deliveries: ReadonlyMap<string, Delivery>
   /**
-   * Send a visible "✅ 完成" line on a clean `turn/end`. Defaults to false; the
-   * streamed live answer already marks a normal completion, so this only adds
-   * explicit end feedback. Interruption causes are always surfaced regardless.
+   * Send a visible "✅ 完成" line on a clean `turn/end`. Defaults to true so the
+   * bot always gets an explicit end-of-session signal; set false to suppress the
+   * extra line on clean completions. Interruption causes are always surfaced.
    */
   notifyEnd?: boolean
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
@@ -54,7 +54,7 @@ export class StreamListener {
     this.ctx = options.ctx
     this.sessions = options.sessions
     this.deliveries = options.deliveries
-    this.notifyEnd = options.notifyEnd ?? false
+    this.notifyEnd = options.notifyEnd ?? true
     this.logger = options.logger
   }
 
