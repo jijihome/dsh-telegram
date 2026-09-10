@@ -34,6 +34,7 @@ import { BotManager, normalizeBots } from './telegram/bot-manager.js'
 import type { MenuCtx } from './telegram/menu.js'
 import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart } from './core/host.js'
+import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -48,6 +49,7 @@ export { SessionManager } from './core/session-manager.js'
 export { StateStore, migrateLegacyState, stateFilePath, botDataDir } from './core/state-store.js'
 export { resolveBotScopes, assertSessionOwnership, routeKey } from './core/bot-scope.js'
 export type { BotScope } from './core/bot-scope.js'
+export { readHostDefaultModel, parseAgentDefaultModel, resolveDshHome } from './core/host-default-model.js'
 export { getHostInfo, scheduleRestart } from './core/host.js'
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js'
 export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js'
@@ -63,6 +65,8 @@ export function apply(ctx: Context, config: TelegramConfig) {
   // Resolve the bot list: `bots[]` or the single bare `token`.
   const bots = normalizeBots(config.bots, config.token)
   const defaultCwd = process.cwd()
+  // DSH home: holds settings.yaml (host default model) and the profile stores.
+  const dshHome = resolveDshHome(join(homedir(), '.dsh'))
 
   // Direct-to-stderr logger so daemon diagnostics survive any Cordis log
   // routing/filtering in headless profiles.
@@ -111,8 +115,16 @@ export function apply(ctx: Context, config: TelegramConfig) {
    * it, so a bot continues the conversation on a working model instead of a
    * hardcoded plugin default. The plugin never WRITES this selection, so a bot's
    * model choice can never leak into another bot or the GUI.
+   *
+   * Source order: the persisted `settings.yaml` first (authoritative — the GUI
+   * model picker writes it), then the runtime service as a fallback. The service
+   * alone is not trustworthy here: during activation it reported its built-in
+   * default (deepseek-official) while the configured model was command-code,
+   * which pointed every bot at a provider with no balance.
    */
   const readDefaultSelection = (): { provider: string; model: string } | undefined => {
+    const fromSettings = readHostDefaultModel(dshHome)
+    if (fromSettings !== undefined) return fromSettings
     try {
       const adm = (ctx.get as (k: string) => unknown)?.('agentDefaultModel') as
         { currentSelection?(): { provider?: string; model?: string } } | undefined
@@ -137,11 +149,12 @@ export function apply(ctx: Context, config: TelegramConfig) {
   // Announce which model each bot will use, so a mis-configured provider shows up
   // in the daemon log instead of only as a failed turn in Telegram.
   const hostDefault = readDefaultSelection()
+  const modelSource = readHostDefaultModel(dshHome) !== undefined ? 'settings.yaml' : 'agentDefaultModel 服务'
   for (const scope of scopes) {
     const effective = scope.modelPinned
       ? `${scope.provider}/${scope.model} (本 Bot 固定)`
       : hostDefault !== undefined
-        ? `${hostDefault.provider}/${hostDefault.model} (跟随宿主默认)`
+        ? `${hostDefault.provider}/${hostDefault.model} (跟随宿主默认,来源 ${modelSource})`
         : `${scope.provider}/${scope.model} (宿主默认不可用,已回退)`
     logger.warn(`bot "${scope.botId}" 模型: ${effective}`)
   }

@@ -21,6 +21,7 @@ import { StateStore, migrateLegacyState, stateFilePath, botDataDir } from '../li
 import { SessionManager } from '../lib/core/session-manager.js'
 import { DshAgentFactory } from '../lib/harness/agent-factory.js'
 import { StreamListener } from '../lib/harness/stream-listener.js'
+import { parseAgentDefaultModel, readHostDefaultModel } from '../lib/core/host-default-model.js'
 
 const TWO_BOTS = [{ id: 'bot-a', token: 'token-a' }, { id: 'bot-b', token: 'token-b' }]
 const silent = { warn() {}, error() {} }
@@ -517,4 +518,55 @@ test('per-bot state and forward log live under the bot directory', () => {
   for (const dir of dirs) {
     assert.match(dir.replace(/\\/g, '/'), /\/bots\/bot-[ab]$/)
   }
+})
+
+// ------------------------------------------------------- host default model
+
+test('host default model is read from the settings.yaml block', () => {
+  const text = [
+    'ui-onboarding:',
+    '  welcomeNoticeVersion: 2026-08-13.1',
+    'agent-default-model:',
+    '  provider: command-code',
+    '  model: deepseek/deepseek-v4-flash-vision-exp',
+    'ui-theme:',
+    '  fontSize: 16',
+  ].join('\n')
+  assert.deepEqual(parseAgentDefaultModel(text), {
+    provider: 'command-code',
+    model: 'deepseek/deepseek-v4-flash-vision-exp',
+  })
+})
+
+test('quoted values are unquoted and missing fields yield undefined', () => {
+  assert.deepEqual(parseAgentDefaultModel([
+    'agent-default-model:',
+    "  provider: 'api-bridge'",
+    '  model: "glm-5.3"',
+  ].join('\n')), { provider: 'api-bridge', model: 'glm-5.3' })
+
+  assert.equal(parseAgentDefaultModel(['agent-default-model:', '  provider: only-provider'].join('\n')), undefined)
+  assert.equal(parseAgentDefaultModel('ui-theme:\n  fontSize: 16\n'), undefined)
+  assert.equal(parseAgentDefaultModel(''), undefined)
+})
+
+test('the scan stops at the next top-level key (no bleed from nested blocks)', () => {
+  const text = [
+    'agent-default-model:',
+    '  provider: command-code',
+    'llm-pi-ai:',
+    '  providers:',
+    '    api-bridge:',
+    '      model: should-not-be-used',
+    'agent-default-model-extra:',
+    '  model: also-not-used',
+  ].join('\n')
+  assert.equal(parseAgentDefaultModel(text), undefined, 'model comes from the wrong block -> refuse, do not guess')
+})
+
+test('readHostDefaultModel reads <home>/settings.yaml and tolerates a missing file', () => {
+  const home = tmp()
+  writeFileSync(join(home, 'settings.yaml'), 'agent-default-model:\n  provider: command-code\n  model: host-model\n', 'utf8')
+  assert.deepEqual(readHostDefaultModel(home), { provider: 'command-code', model: 'host-model' })
+  assert.equal(readHostDefaultModel(join(home, 'nope')), undefined)
 })

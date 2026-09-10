@@ -360,7 +360,10 @@ async function doSessionPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
 /** Ops submenu: system info + restart dsh. Authorized users only. */
 function doOps(ctx: MenuCtx): MenuResult {
   if (!ctx.canOperate) {
-    return { text: '⛔ 无权限使用运维功能(需在 allowedUserIds 白名单内)', keyboard: mainMenuKeyboard() }
+    return {
+      text: `⛔ 无权限使用运维功能\n你的 Telegram user id: ${ctx.userId}\n(把该 id 加入 allowedUserIds 白名单即可)`,
+      keyboard: mainMenuKeyboard(),
+    }
   }
   return { text: '⚙️ 运维中心\n选择操作:', keyboard: opsMenuKeyboard() }
 }
@@ -368,7 +371,10 @@ function doOps(ctx: MenuCtx): MenuResult {
 /** Show a host-process snapshot. */
 function doOpsInfo(ctx: MenuCtx): MenuResult {
   if (!ctx.canOperate) {
-    return { text: '⛔ 无权限使用运维功能(需在 allowedUserIds 白名单内)', keyboard: mainMenuKeyboard() }
+    return {
+      text: `⛔ 无权限使用运维功能\n你的 Telegram user id: ${ctx.userId}\n(把该 id 加入 allowedUserIds 白名单即可)`,
+      keyboard: mainMenuKeyboard(),
+    }
   }
   return { text: `💻 宿主进程信息:\n${ctx.getHostInfo()}`, keyboard: opsMenuKeyboard() }
 }
@@ -376,7 +382,10 @@ function doOpsInfo(ctx: MenuCtx): MenuResult {
 /** Schedule a host dsh restart (detached agent takes the host down & relaunches). */
 function doRestartDsh(ctx: MenuCtx): MenuResult {
   if (!ctx.canOperate) {
-    return { text: '⛔ 无权限使用运维功能(需在 allowedUserIds 白名单内)', keyboard: mainMenuKeyboard() }
+    return {
+      text: `⛔ 无权限使用运维功能\n你的 Telegram user id: ${ctx.userId}\n(把该 id 加入 allowedUserIds 白名单即可)`,
+      keyboard: mainMenuKeyboard(),
+    }
   }
   return { text: ctx.restartDsh(), keyboard: mainMenuKeyboard() }
 }

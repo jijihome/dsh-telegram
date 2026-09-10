@@ -35,6 +35,7 @@ export { SessionManager } from './core/session-manager.js';
 export { StateStore, migrateLegacyState, stateFilePath, botDataDir } from './core/state-store.js';
 export { resolveBotScopes, assertSessionOwnership, routeKey } from './core/bot-scope.js';
 export type { BotScope } from './core/bot-scope.js';
+export { readHostDefaultModel, parseAgentDefaultModel, resolveDshHome } from './core/host-default-model.js';
 export { getHostInfo, scheduleRestart } from './core/host.js';
 export { normalizeChunk, normalizeSessionEvent } from './core/event-normalizer.js';
 export type { NormalizedMessage, TerminalStatus } from './core/event-normalizer.js';
