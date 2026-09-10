@@ -79,6 +79,17 @@ export declare class StreamListener {
     private readonly stallWatch;
     private readonly openTurn;
     private readonly stallNotified;
+    /** Turn already reported as "waiting for input" (A), so B does not duplicate it. */
+    private readonly waitNotified;
+    /**
+     * Whether the session currently has a step in flight (`step/start` seen with
+     * no `step/end`). A long-running tool call or model request lives INSIDE a
+     * step, so silence there is expected and must NOT be reported as a stall —
+     * this is what stops the watchdog from crying wolf while the agent is happily
+     * grinding through a slow read/command. Only silence with no open step (the
+     * agent produced nothing and is between steps) is a real stall signal.
+     */
+    private readonly openStep;
     /** Watchdog window in ms; 0 disables the time-based stall notice. */
     private readonly stallNoticeMs;
     /** Quiescence window (ms) for the event-based "waiting" notice. */

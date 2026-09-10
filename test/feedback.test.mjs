@@ -131,3 +131,38 @@ test('B: the stall watchdog fires at most once per turn', async () => {
   const stalls = delivery.sent.filter((line) => line.startsWith('⚠️') && line.includes('无输出'))
   assert.equal(stalls.length, 1, 'exactly one stall notice per turn, got: ' + JSON.stringify(delivery.sent))
 })
+
+test('B regression: an open step (long tool call) must NOT be reported as a stall', async () => {
+  // Real report: a long read-only tool call produced no visible output for
+  // minutes while the agent was perfectly healthy -> the watchdog cried wolf.
+  const { ctx, delivery } = build({ stallNoticeMs: 30, waitQuiescenceMs: 100000 })
+  ctx.handlers['session/event'](SESSION, { type: 'turn/start', data: { turn: 1 } })
+  ctx.handlers['session/event'](SESSION, { type: 'step/start', data: { turn: 1, step: 1 } })
+
+  await sleep(140)
+  const stalls = delivery.sent.filter((line) => line.startsWith('⚠️') && line.includes('无输出'))
+  assert.equal(stalls.length, 0, 'a step in flight means the agent is working, not stalled: ' + JSON.stringify(delivery.sent))
+})
+
+test('B: once the step closes and silence continues, the stall IS reported', async () => {
+  const { ctx, delivery } = build({ stallNoticeMs: 40, waitQuiescenceMs: 100000 })
+  ctx.handlers['session/event'](SESSION, { type: 'turn/start', data: { turn: 1 } })
+  ctx.handlers['session/event'](SESSION, { type: 'step/start', data: { turn: 1, step: 1 } })
+  await sleep(70)
+  ctx.handlers['session/event'](SESSION, { type: 'step/end', data: { turn: 1, step: 1 } })
+
+  await sleep(120)
+  const stalls = delivery.sent.filter((line) => line.startsWith('⚠️') && line.includes('无输出'))
+  assert.equal(stalls.length, 1, 'silence with no open step is a real stall: ' + JSON.stringify(delivery.sent))
+})
+
+test('A then B: a turn already reported as waiting is not also reported as stalled', async () => {
+  const { ctx, delivery } = build({ stallNoticeMs: 40, waitQuiescenceMs: 20 })
+  ctx.handlers['session/event'](SESSION, { type: 'turn/start', data: { turn: 1 } })
+  ctx.handlers['agent/status']({ agent: { session: SESSION }, status: 'idle' })
+
+  await sleep(140)
+  assert.ok(delivery.sent.includes(WAITING), 'expected the waiting notice first')
+  const stalls = delivery.sent.filter((line) => line.startsWith('⚠️') && line.includes('无输出'))
+  assert.equal(stalls.length, 0, 'the waiting notice already covered this turn: ' + JSON.stringify(delivery.sent))
+})

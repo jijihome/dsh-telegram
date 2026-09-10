@@ -83,6 +83,17 @@ export class StreamListener {
   private readonly stallWatch = new Map<string, NodeJS.Timeout>()
   private readonly openTurn = new Map<string, number>()
   private readonly stallNotified = new Map<string, number>()
+  /** Turn already reported as "waiting for input" (A), so B does not duplicate it. */
+  private readonly waitNotified = new Map<string, number>()
+  /**
+   * Whether the session currently has a step in flight (`step/start` seen with
+   * no `step/end`). A long-running tool call or model request lives INSIDE a
+   * step, so silence there is expected and must NOT be reported as a stall —
+   * this is what stops the watchdog from crying wolf while the agent is happily
+   * grinding through a slow read/command. Only silence with no open step (the
+   * agent produced nothing and is between steps) is a real stall signal.
+   */
+  private readonly openStep = new Map<string, boolean>()
   /** Watchdog window in ms; 0 disables the time-based stall notice. */
   private readonly stallNoticeMs: number
   /** Quiescence window (ms) for the event-based "waiting" notice. */
@@ -198,11 +209,16 @@ export class StreamListener {
       for (const route of stillRoutes) {
         const delivery = this.deliveries.get(route.botId)
         if (delivery !== undefined) {
+          // Record the turn so B's stall watchdog will not double-report it.
+          const turn = this.openTurn.get(sessionId)
+          if (turn !== undefined) this.waitNotified.set(sessionId, turn)
           void delivery.endLive(route.chatId)
           void delivery.sendFinal(route.chatId, '⏳ agent 已暂停，正在等待你的回复/继续…')
         }
       }
     }, this.waitQuiescenceMs)
+    // Advisory timers must never hold the event loop open (host shutdown, tests).
+    timer.unref?.()
     this.pendingWait.set(sessionId, timer)
   }
 
@@ -244,16 +260,27 @@ export class StreamListener {
     // B (watchdog) bookkeeping: an open turn is watched for silence; every
     // activity pushes the deadline out, and the turn closing stops the watch.
     const turn = (event.data as { turn?: number }).turn ?? -1
+    if (type === 'step/start') {
+      this.openStep.set(sessionId, true)
+    } else if (type === 'step/end') {
+      this.openStep.set(sessionId, false)
+    }
     if (type === 'turn/start') {
       this.openTurn.set(sessionId, turn)
       this.stallNotified.delete(sessionId)
+      this.waitNotified.delete(sessionId)
+      this.openStep.set(sessionId, false)
       this.armStallWatch(sessionId, turn)
     } else if (type === 'turn/end') {
       this.openTurn.delete(sessionId)
+      this.openStep.delete(sessionId)
       this.cancelStallWatch(sessionId)
     } else {
       const open = this.openTurn.get(sessionId)
-      if (open !== undefined) this.armStallWatch(sessionId, open)
+      // Re-arm on activity only while no step is in flight: an open step already
+      // suppresses the watchdog, and re-arming inside one would keep postponing
+      // the check past the step's end.
+      if (open !== undefined && this.openStep.get(sessionId) !== true) this.armStallWatch(sessionId, open)
     }
 
     // 1. Chunk events drive the live streaming segment.
@@ -336,19 +363,30 @@ export class StreamListener {
       // Only report while that same turn is still open, and only once per turn.
       if (this.openTurn.get(sessionId) !== turn) return
       if (this.stallNotified.get(sessionId) === turn) return
+      // A step is in flight → the agent is inside a (possibly slow) tool call or
+      // model request; silence is expected. Keep waiting instead of crying wolf.
+      if (this.openStep.get(sessionId) === true) {
+        this.armStallWatch(sessionId, turn)
+        return
+      }
+      // The event-based notice already told the user this turn is waiting; do not
+      // contradict it with a "stalled" line for the same turn.
+      if (this.waitNotified.get(sessionId) === turn) return
       this.stallNotified.set(sessionId, turn)
       const routes = this.resolveRoutes(sessionId)
-      this.logger?.warn(`[tg] agent ${sessionId}#${turn} produced no output for ${this.stallNoticeMs}ms; notifying stall`)
+      this.logger?.warn(`[tg] agent ${sessionId}#${turn} idle ${this.stallNoticeMs}ms with no step open; notifying stall`)
       for (const route of routes) {
         const delivery = this.deliveries.get(route.botId)
         if (delivery !== undefined) {
           void delivery.sendFinal(
             route.chatId,
-            `⚠️ 已 ${Math.round(this.stallNoticeMs / 1000)} 秒无输出,agent 可能停滞或正在等待。可发消息催一下,或 /stop 取消。`,
+            `⚠️ 已 ${Math.round(this.stallNoticeMs / 1000)} 秒无输出且无进行中的步骤,agent 可能已停滞。可发消息催一下,或 /stop 取消。`,
           )
         }
       }
     }, this.stallNoticeMs)
+    // Advisory timers must never hold the event loop open (host shutdown, tests).
+    timer.unref?.()
     this.stallWatch.set(sessionId, timer)
   }
 
