@@ -105,8 +105,46 @@ export function apply(ctx: Context, config: TelegramConfig) {
     stores.set(scope.botId, new StateStore({ dataDir: scope.dataDir, botId: scope.botId }))
   }
 
+  /**
+   * Read-only view of the host default model (`agent-default-model`) — the same
+   * default the GUI itself uses. A bot without an explicit provider/model follows
+   * it, so a bot continues the conversation on a working model instead of a
+   * hardcoded plugin default. The plugin never WRITES this selection, so a bot's
+   * model choice can never leak into another bot or the GUI.
+   */
+  const readDefaultSelection = (): { provider: string; model: string } | undefined => {
+    try {
+      const adm = (ctx.get as (k: string) => unknown)?.('agentDefaultModel') as
+        { currentSelection?(): { provider?: string; model?: string } } | undefined
+      const selection = adm?.currentSelection?.()
+      if (selection?.provider === undefined || selection?.model === undefined) return undefined
+      return { provider: selection.provider, model: selection.model }
+    } catch {
+      return undefined
+    }
+  }
+
   const factory = new DshAgentFactory(ctx)
-  const sessions = new SessionManager({ factory, stores, scopes: scopeById, defaultCwd, logger })
+  const sessions = new SessionManager({
+    factory,
+    stores,
+    scopes: scopeById,
+    defaultCwd,
+    defaultSelection: readDefaultSelection,
+    logger,
+  })
+
+  // Announce which model each bot will use, so a mis-configured provider shows up
+  // in the daemon log instead of only as a failed turn in Telegram.
+  const hostDefault = readDefaultSelection()
+  for (const scope of scopes) {
+    const effective = scope.modelPinned
+      ? `${scope.provider}/${scope.model} (本 Bot 固定)`
+      : hostDefault !== undefined
+        ? `${hostDefault.provider}/${hostDefault.model} (跟随宿主默认)`
+        : `${scope.provider}/${scope.model} (宿主默认不可用,已回退)`
+    logger.warn(`bot "${scope.botId}" 模型: ${effective}`)
+  }
 
   // Per-bot config session bindings (chat ↔ existing DSH session). Conflicts
   // between bots are refused here, which aborts activation on purpose.

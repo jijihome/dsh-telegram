@@ -62,9 +62,14 @@ export interface TelegramConfig {
   allowedUserIds?: number[]
   /** Allow any Telegram user (development only). */
   allowAllUsers?: boolean
-  /** LLM provider id passed to each created agent. */
+  /**
+   * LLM provider id passed to each created agent. Leave unset to follow the host
+   * default model (`agent-default-model`) — the same default the GUI uses — so a
+   * bot continues the conversation on a working model instead of a hardcoded
+   * plugin default. Setting it pins every bot (overridable per bot).
+   */
   provider?: string
-  /** Model id passed to each created agent. */
+  /** Model id passed to each created agent; unset = follow the host default model. */
   model?: string
   /** Per-chunk message length limit (Telegram caps at 4096). */
   maxMessageLength?: number
@@ -119,8 +124,8 @@ export const Config: Schema<TelegramConfig> = Schema.object({
   token: Schema.string(),
   allowedUserIds: Schema.array(Schema.number()).default([]),
   allowAllUsers: Schema.boolean().default(false),
-  provider: Schema.string().default('deepseek-official'),
-  model: Schema.string().default('deepseek-v4-flash'),
+  provider: Schema.string(),
+  model: Schema.string(),
   maxMessageLength: Schema.number().default(4096),
   pollingTimeoutSec: Schema.number().default(30),
   workspaceRoots: Schema.array(Schema.string()),

@@ -81,12 +81,13 @@ function fakeFactory({ realSessionId } = {}) {
 }
 
 /** SessionManager over an env + fake factory. */
-function makeManager(env, factory, defaultCwd = 'E:/ws') {
+function makeManager(env, factory, defaultCwd = 'E:/ws', defaultSelection) {
   return new SessionManager({
     factory,
     stores: env.stores,
     scopes: env.scopeById,
     defaultCwd,
+    ...(defaultSelection !== undefined ? { defaultSelection } : {}),
     logger: silent,
   })
 }
@@ -309,6 +310,47 @@ test('model selection is per route and persisted per bot', async () => {
   assert.equal(env.stores.get('bot-b').getChat('bot-b:5'), undefined)
   assert.deepEqual(factory.selections.get('bot-a:5'), { provider: 'prov-2', model: 'model-2' })
   assert.equal(factory.selections.has('bot-b:5'), false)
+})
+
+test('a bot without a pinned model follows the host default (继续会话)', async () => {
+  const env = makeEnv()
+  const manager = makeManager(env, fakeFactory(), 'E:/ws', () => ({ provider: 'command-code', model: 'deepseek/deepseek-v4-flash-vision-exp' }))
+  await manager.getOrCreate(5, 'bot-a')
+  assert.deepEqual(manager.modelFor(5, 'bot-a'), {
+    provider: 'command-code',
+    model: 'deepseek/deepseek-v4-flash-vision-exp',
+  })
+  // Resuming/creating an agent carries that same effective selection.
+  const factory = fakeFactory()
+  const manager2 = makeManager(env, factory, 'E:/ws', () => ({ provider: 'command-code', model: 'host-model' }))
+  await manager2.getOrCreate(6, 'bot-a')
+  const request = factory.requests.at(-1)
+  assert.equal(request.provider, 'command-code')
+  assert.equal(request.model, 'host-model')
+})
+
+test('an explicitly pinned bot model wins over the host default', async () => {
+  const env = makeEnv({ bots: TWO_BOTS.map(b => ({ ...b, provider: 'pinned-prov', model: 'pinned-model' })) })
+  const manager = makeManager(env, fakeFactory(), 'E:/ws', () => ({ provider: 'host-prov', model: 'host-model' }))
+  assert.deepEqual(manager.modelFor(9, 'bot-a'), { provider: 'pinned-prov', model: 'pinned-model' })
+})
+
+test('a per-chat pick wins over both the host default and the bot pin', async () => {
+  const env = makeEnv()
+  const manager = makeManager(env, fakeFactory(), 'E:/ws', () => ({ provider: 'host-prov', model: 'host-model' }))
+  await manager.getOrCreate(5, 'bot-a')
+  assert.deepEqual(manager.modelFor(5, 'bot-a'), { provider: 'host-prov', model: 'host-model' })
+  manager.setModel(5, 'bot-a', 'picked-prov', 'picked-model')
+  assert.deepEqual(manager.modelFor(5, 'bot-a'), { provider: 'picked-prov', model: 'picked-model' })
+  // The host default is only ever READ: nothing about it is persisted.
+  const state = env.stores.get('bot-a').getChat('bot-a:5')
+  assert.equal(state.provider, 'picked-prov')
+})
+
+test('a bot falls back to its scope default when the host default is unavailable', async () => {
+  const env = makeEnv()
+  const manager = makeManager(env, fakeFactory(), 'E:/ws', () => undefined)
+  assert.deepEqual(manager.modelFor(5, 'bot-b'), { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
 })
 
 test('agent creation carries the per-route selection and never touches the host default model', async () => {

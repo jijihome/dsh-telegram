@@ -58,6 +58,14 @@ export interface SessionManagerOptions {
     /** One resolved isolation scope per bot id. */
     scopes: ReadonlyMap<string, BotScope>;
     defaultCwd: string;
+    /**
+     * Read-only accessor for the host default model (`agent-default-model`), used
+     * when a bot does not pin its own provider/model. Must never write.
+     */
+    defaultSelection?: () => {
+        provider: string;
+        model: string;
+    } | undefined;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -69,6 +77,7 @@ export declare class SessionManager {
     private readonly stores;
     private readonly scopes;
     private readonly defaultCwd;
+    private readonly defaultSelection;
     private readonly logger;
     private readonly bindings;
     /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */
@@ -152,8 +161,14 @@ export declare class SessionManager {
     /** Send a user text into the chat's agent (queued as a normal follow-up). */
     followup(chatId: number, botId: string, text: string, onError?: (error: unknown) => void): void;
     /**
-     * Effective model for one route: the chat's persisted override first, then the
-     * owning bot's default. Never consults the host-global default model.
+     * Effective model for one route, in strict priority order:
+     * 1. the chat's persisted override (the user picked it in the model menu);
+     * 2. the host default model when this bot does not pin one — read-only, so the
+     *    bot continues the conversation on the same model the GUI uses;
+     * 3. the bot scope default (explicit pin, or the last-resort fallback).
+     *
+     * The host-global selection is only ever READ here; the plugin never writes it,
+     * so one bot's model choice can never leak into another bot or the GUI.
      */
     modelFor(chatId: number, botId: string): {
         provider: string;

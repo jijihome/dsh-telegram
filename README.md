@@ -64,7 +64,7 @@ dsh --profile <name> --dump-config | grep telegram
 | `token` | - | 单 Bot 简写;与 `bots` 二选一 |
 | `allowedUserIds` | `[]` | 允许的 Telegram 用户 id;空 = 拒绝所有人 |
 | `allowAllUsers` | `false` | 放行所有用户(仅开发) |
-| `provider` / `model` | `deepseek-official` / `deepseek-v4-flash` | 各 Bot 的默认 LLM 选择 |
+| `provider` / `model` | 未设置 = 跟随宿主默认模型 | 各 Bot 的默认 LLM 选择;设置后为固定值(可按 Bot 覆盖) |
 | `maxMessageLength` | `4096` | 消息长度上限 |
 | `pollingTimeoutSec` | `30` | 长轮询超时(秒) |
 | `workspaceRoots` | `[cwd]` | /workspace 可浏览的根目录 |
@@ -85,7 +85,7 @@ dsh --profile <name> --dump-config | grep telegram
 | 隔离面 | 行为 |
 | --- | --- |
 | 身份 | `botId` 必须唯一且不含 `:`;`token` 必须唯一(共用 token 会互抢 getUpdates)。违反则**启动即失败**,不做 last-wins 覆盖 |
-| 模型 | 菜单切换写入 `botId:chatId` 的 per-chat 状态并热切换该路由的 agent;**从不读写宿主全局 `agentDefaultModel`**,因此不影响其他 Bot 与 GUI |
+| 模型 | 解析顺序:① 该 chat 在菜单里选过的模型(存 `botId:chatId`)→ ② **未固定模型的 Bot 跟随宿主默认模型**(只读 `agentDefaultModel`,与 GUI 同一个默认,保证继续会话)→ ③ Bot 在配置里固定的 `provider/model`。菜单切换热切换该路由的 agent;**从不写入宿主全局**,不影响其他 Bot 与 GUI |
 | 会话归属 | 一个 DSH 会话只能属于一个「Bot+chat」路由;重复绑定直接报错(除非相关 Bot 都设 `allowSharedSessions: true`) |
 | 出站路由 | 事件按 sessionId 反查唯一路由;非本插件会话 O(1) 丢弃,不存在跨 Bot 扇出 |
 | 入站绑定 | 裸 `chatId` 绑定仅在**单 Bot** 下可用;多 Bot 下写裸键会启动失败(必须写 `<botId>:<chatId>`) |

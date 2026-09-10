@@ -66,6 +66,11 @@ export interface SessionManagerOptions {
   /** One resolved isolation scope per bot id. */
   scopes: ReadonlyMap<string, BotScope>
   defaultCwd: string
+  /**
+   * Read-only accessor for the host default model (`agent-default-model`), used
+   * when a bot does not pin its own provider/model. Must never write.
+   */
+  defaultSelection?: () => { provider: string; model: string } | undefined
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -80,6 +85,7 @@ export class SessionManager {
   private readonly stores: ReadonlyMap<string, StateStore>
   private readonly scopes: ReadonlyMap<string, BotScope>
   private readonly defaultCwd: string
+  private readonly defaultSelection: SessionManagerOptions['defaultSelection']
   private readonly logger: SessionManagerOptions['logger'] | undefined
   private readonly bindings = new Map<string, SessionBinding>()
   /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */
@@ -97,6 +103,7 @@ export class SessionManager {
     this.stores = options.stores
     this.scopes = options.scopes
     this.defaultCwd = options.defaultCwd
+    this.defaultSelection = options.defaultSelection
     this.logger = options.logger
   }
 
@@ -356,12 +363,25 @@ export class SessionManager {
   }
 
   /**
-   * Effective model for one route: the chat's persisted override first, then the
-   * owning bot's default. Never consults the host-global default model.
+   * Effective model for one route, in strict priority order:
+   * 1. the chat's persisted override (the user picked it in the model menu);
+   * 2. the host default model when this bot does not pin one — read-only, so the
+   *    bot continues the conversation on the same model the GUI uses;
+   * 3. the bot scope default (explicit pin, or the last-resort fallback).
+   *
+   * The host-global selection is only ever READ here; the plugin never writes it,
+   * so one bot's model choice can never leak into another bot or the GUI.
    */
   modelFor(chatId: number, botId: string): { provider: string; model: string } {
     const scope = this.scopeOf(botId)
     const state = this.storeFor(botId).getChat(routeKey(botId, chatId))
+    if (state?.provider !== undefined && state.model !== undefined) {
+      return { provider: state.provider, model: state.model }
+    }
+    if (!scope.modelPinned) {
+      const host = this.defaultSelection?.()
+      if (host !== undefined && host.provider !== '' && host.model !== '') return host
+    }
     return {
       provider: state?.provider ?? scope.provider,
       model: state?.model ?? scope.model,

@@ -32,6 +32,13 @@ export interface BotScope {
   provider: string
   /** Default model for this bot's agents. */
   model: string
+  /**
+   * True when this bot (or the plugin config) pins an explicit provider/model.
+   * When false the route follows the host default model at request time
+   * (read-only, never written), so a bot continues the conversation on the same
+   * model the GUI uses instead of a hardcoded plugin default.
+   */
+  modelPinned: boolean
   /** Working directory roots this bot may browse. */
   workspaceRoots: string[]
   /** Proxy used for this bot's Telegram traffic, if any. */
@@ -48,6 +55,10 @@ export interface BotScope {
 
 /** Ids must survive `${botId}:${chatId}` key composition, so `:` is excluded. */
 const BOT_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
+/** Last-resort model used only when neither the bot nor the host declares one. */
+const DEFAULT_PROVIDER = 'deepseek-official'
+const DEFAULT_MODEL = 'deepseek-v4-flash'
 
 /** Build the canonical isolation key for one chat inside one bot. */
 export function routeKey(botId: string, chatId: number): string {
@@ -99,16 +110,24 @@ export function resolveBotScopes(bots: BotConfig[], config: TelegramConfig, defa
   const globalSharedSessions = config.allowSharedSessions ?? false
   const single = bots.length === 1
 
+  // An explicit provider/model at bot or plugin level pins the route; otherwise
+  // the route follows the host default model (see `modelPinned`).
+  const configProvider = config.provider
+  const configModel = config.model
+
   return bots.map(bot => {
     const dataDir = bot.dataDir ?? config.dataDir ?? joinDefaultDataDir(defaultCwd)
+    const pinnedProvider = bot.provider ?? configProvider
+    const pinnedModel = bot.model ?? configModel
     return {
       botId: bot.id,
       token: bot.token,
       bindings: bot.bindings ?? {},
       allowedUserIds: bot.allowedUserIds ?? config.allowedUserIds ?? [],
       allowAllUsers: bot.allowAllUsers ?? config.allowAllUsers ?? false,
-      provider: bot.provider ?? config.provider ?? 'deepseek-official',
-      model: bot.model ?? config.model ?? 'deepseek-v4-flash',
+      provider: pinnedProvider ?? DEFAULT_PROVIDER,
+      model: pinnedModel ?? DEFAULT_MODEL,
+      modelPinned: pinnedProvider !== undefined || pinnedModel !== undefined,
       workspaceRoots: bot.workspaceRoots ?? config.workspaceRoots ?? [defaultCwd],
       ...(bot.proxy !== undefined ? { proxy: bot.proxy }
         : config.proxy !== undefined ? { proxy: config.proxy }

@@ -29,6 +29,13 @@ export interface BotScope {
     provider: string;
     /** Default model for this bot's agents. */
     model: string;
+    /**
+     * True when this bot (or the plugin config) pins an explicit provider/model.
+     * When false the route follows the host default model at request time
+     * (read-only, never written), so a bot continues the conversation on the same
+     * model the GUI uses instead of a hardcoded plugin default.
+     */
+    modelPinned: boolean;
     /** Working directory roots this bot may browse. */
     workspaceRoots: string[];
     /** Proxy used for this bot's Telegram traffic, if any. */
