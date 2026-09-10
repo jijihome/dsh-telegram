@@ -60,6 +60,19 @@ const BOT_ID_PATTERN = /^[A-Za-z0-9._-]+$/
 const DEFAULT_PROVIDER = 'deepseek-official'
 const DEFAULT_MODEL = 'deepseek-v4-flash'
 
+/**
+ * Resolve a per-bot list field with the plugin-level list as fallback.
+ *
+ * Empty counts as "not set" on purpose: the config schema turns an absent
+ * per-bot array into `[]`, so `??`-style fallback never fires and the
+ * plugin-level value is silently lost.
+ */
+function inheritList<T>(botValue: readonly T[] | undefined, configValue: readonly T[] | undefined, fallback: T[]): T[] {
+  if (botValue !== undefined && botValue.length > 0) return [...botValue]
+  if (configValue !== undefined && configValue.length > 0) return [...configValue]
+  return [...fallback]
+}
+
 /** Build the canonical isolation key for one chat inside one bot. */
 export function routeKey(botId: string, chatId: number): string {
   return `${botId}:${chatId}`
@@ -123,12 +136,16 @@ export function resolveBotScopes(bots: BotConfig[], config: TelegramConfig, defa
       botId: bot.id,
       token: bot.token,
       bindings: bot.bindings ?? {},
-      allowedUserIds: bot.allowedUserIds ?? config.allowedUserIds ?? [],
+      // Array fields fall back on EMPTY, not on undefined: the config schema
+      // materializes absent per-bot arrays as `[]`, which would otherwise shadow
+      // the plugin-level whitelist and workspace roots (this silently locked the
+      // operator out of their own bot and emptied the workspace menu).
+      allowedUserIds: inheritList(bot.allowedUserIds, config.allowedUserIds, []),
       allowAllUsers: bot.allowAllUsers ?? config.allowAllUsers ?? false,
       provider: pinnedProvider ?? DEFAULT_PROVIDER,
       model: pinnedModel ?? DEFAULT_MODEL,
       modelPinned: pinnedProvider !== undefined || pinnedModel !== undefined,
-      workspaceRoots: bot.workspaceRoots ?? config.workspaceRoots ?? [defaultCwd],
+      workspaceRoots: inheritList(bot.workspaceRoots, config.workspaceRoots, [defaultCwd]),
       ...(bot.proxy !== undefined ? { proxy: bot.proxy }
         : config.proxy !== undefined ? { proxy: config.proxy }
           : {}),

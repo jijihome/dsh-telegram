@@ -570,3 +570,30 @@ test('readHostDefaultModel reads <home>/settings.yaml and tolerates a missing fi
   assert.deepEqual(readHostDefaultModel(home), { provider: 'command-code', model: 'host-model' })
   assert.equal(readHostDefaultModel(join(home, 'nope')), undefined)
 })
+
+test('per-bot array fields that the schema materialized as [] still inherit the plugin list', () => {
+  // The config schema turns an absent per-bot array into [] (verified against the
+  // real schemastery validation), so `??`-style fallback silently lost the
+  // plugin-level whitelist/workspace roots: every user was denied and the
+  // workspace menu collapsed to a single entry.
+  const scopes = resolveBotScopes(
+    [{ id: 'bot-a', token: 't-a', allowedUserIds: [], workspaceRoots: [] }],
+    { allowedUserIds: [6434599758], workspaceRoots: ['E:/ws'] },
+    'E:/fallback',
+  )
+  assert.deepEqual(scopes[0].allowedUserIds, [6434599758])
+  assert.deepEqual(scopes[0].workspaceRoots, ['E:/ws'])
+})
+
+test('an explicit per-bot list overrides the plugin list, an empty one never wins', () => {
+  const scopes = resolveBotScopes([
+    { id: 'bot-a', token: 't-a', allowedUserIds: [111], workspaceRoots: ['E:/a'] },
+    { id: 'bot-b', token: 't-b', allowedUserIds: [] },
+  ], { allowedUserIds: [222], workspaceRoots: ['E:/plugin'], dataDir: 'E:/d' }, 'E:/fallback')
+  const a = scopes.find(s => s.botId === 'bot-a')
+  const b = scopes.find(s => s.botId === 'bot-b')
+  assert.deepEqual(a.allowedUserIds, [111])
+  assert.deepEqual(a.workspaceRoots, ['E:/a'])
+  assert.deepEqual(b.allowedUserIds, [222], 'empty per-bot list inherits instead of locking everyone out')
+  assert.deepEqual(b.workspaceRoots, ['E:/plugin'], 'empty per-bot roots inherit the plugin roots')
+})

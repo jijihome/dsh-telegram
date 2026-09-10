@@ -63,7 +63,11 @@ export declare class BotManager {
     private launch;
     /** Route one Telegram update: authorize, then command or agent follow-up. */
     private handleUpdate;
-    /** Whitelist or allow-all check for one bot. */
+    /**
+     * Whitelist or allow-all check for one bot. Ids are compared numerically so a
+     * string/number mismatch introduced by config serialization cannot lock the
+     * operator out of their own bot.
+     */
     private isAllowed;
     /** Handle a callback_query (menu button press). */
     private handleCallback;

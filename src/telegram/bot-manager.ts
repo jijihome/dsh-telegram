@@ -159,8 +159,11 @@ export class BotManager {
     // an operator can whitelist exactly the right account instead of guessing.
     const userId = message.from?.id ?? 0
     if (!this.isAllowed(scope, userId)) {
-      this.options.logger?.warn(`[tg] bot "${scope.botId}" 拒绝非白名单用户: user=${userId} chat=${chatId}`)
-      await delivery.sendFinal(chatId, `⛔ 未授权的用户\n你的 Telegram user id: ${userId}\n(把该 id 加入 allowedUserIds 即可放行)`)
+      this.options.logger?.warn(
+        `[tg] bot "${scope.botId}" 拒绝非白名单用户: user=${userId} chat=${chatId}`
+        + ` (生效白名单=[${scope.allowedUserIds.join(',')}] allowAllUsers=${scope.allowAllUsers})`,
+      )
+      await delivery.sendFinal(chatId, `⛔ 未授权的用户\n你的 Telegram user id: ${userId}\n(生效白名单: [${scope.allowedUserIds.join(',')}];allowAllUsers=${scope.allowAllUsers})`)
       return
     }
 
@@ -220,10 +223,14 @@ export class BotManager {
     }
   }
 
-  /** Whitelist or allow-all check for one bot. */
+  /**
+   * Whitelist or allow-all check for one bot. Ids are compared numerically so a
+   * string/number mismatch introduced by config serialization cannot lock the
+   * operator out of their own bot.
+   */
   private isAllowed(scope: BotScope, userId: number): boolean {
     if (scope.allowAllUsers) return true
-    return scope.allowedUserIds.includes(userId)
+    return scope.allowedUserIds.some(id => Number(id) === Number(userId))
   }
 
   /** Handle a callback_query (menu button press). */
@@ -248,10 +255,11 @@ export class BotManager {
     // by a non-whitelisted user.
     menuCtx.userId = callbackQuery.from?.id ?? 0
     menuCtx.canOperate = this.isAllowed(scope, menuCtx.userId)
-    // Log every menu press with its sender, so a whitelist mismatch is visible in
-    // the daemon log (ops actions are gated on exactly this id).
+    // Log every menu press with its sender plus the EFFECTIVE whitelist, so a
+    // config that never reached the plugin is distinguishable from an id mismatch.
     this.options.logger?.warn(
-      `[tg] bot "${scope.botId}" menu callback "${data}" user=${menuCtx.userId} chat=${chatId} canOperate=${menuCtx.canOperate}`,
+      `[tg] bot "${scope.botId}" menu callback "${data}" user=${menuCtx.userId} chat=${chatId}`
+      + ` canOperate=${menuCtx.canOperate} allowedUserIds=[${scope.allowedUserIds.join(',')}] allowAllUsers=${scope.allowAllUsers}`,
     )
     try {
       const result = await handleMenuCallback(data, menuCtx)
