@@ -35,6 +35,7 @@ import type { MenuCtx } from './telegram/menu.js'
 import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, readHostInstance, writeHostInstance, resolveRestartNotice } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
+import { registerInteractions } from './interactions/interaction-listener.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -542,6 +543,17 @@ export function apply(ctx: Context, config: TelegramConfig) {
     }
   }
 
+  // Interactive seams (user-questions/request, approval/request) forwarded to
+  // Telegram and answered from Telegram. Owned agents get the prompt; anything
+  // else delegates to the host GUI via next().
+  const { onCallback, onText } = registerInteractions({
+    ctx,
+    sessions,
+    deliveries,
+    config,
+    logger,
+  })
+
   // Bot manager: owns clients, polls, deliveries — one runtime per scope.
   const manager = new BotManager({
     scopes,
@@ -550,6 +562,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
     maxMessageLength: config.maxMessageLength ?? 4096,
     defaultCwd,
     menuCtxFor,
+    respond: { onCallback, onText },
     logger,
   })
 

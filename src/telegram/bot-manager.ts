@@ -40,6 +40,16 @@ export interface BotManagerOptions {
   defaultCwd: string
   /** Build a MenuCtx for one (chat, bot) pair (injected from the plugin entry). */
   menuCtxFor?: (chatId: number, botId: string) => MenuCtx
+  /**
+   * Hook to consume an inbound text / inline-keyboard callback as an answer to a
+   * pending interactive prompt (user-questions / approval forwarded to Telegram).
+   * Returning `true` means the update was consumed and must not fall through to
+   * the menu or the agent session.
+   */
+  respond?: {
+    onCallback(data: string, chatId: number, botId: string): Promise<boolean>
+    onText(text: string, chatId: number, botId: string): Promise<boolean>
+  }
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -174,6 +184,15 @@ export class BotManager {
 
     const text = message.text ?? ''
 
+    // A pending interactive answer consumes a plain-text reply before commands.
+    if (text.trim() !== '' && this.options.respond !== undefined) {
+      try {
+        if (await this.options.respond.onText(text, chatId, scope.botId)) return
+      } catch (error) {
+        this.options.logger?.warn(`[tg] respond.onText failed: ${messageOf(error)}`)
+      }
+    }
+
     // /menu shows the inline keyboard menu with the status summary on top.
     if (/^\/(menu)$/.test(text.trim())) {
       const menuCtx = this.options.menuCtxFor?.(chatId, scope.botId)
@@ -253,6 +272,15 @@ export class BotManager {
       this.options.logger?.warn(`[tg] answerCallbackQuery failed: ${messageOf(error)}`)
     }
     const data = callbackQuery.data ?? ''
+    // A pending interactive answer (user-questions / approval) consumes the press
+    // before any menu routing.
+    if (this.options.respond !== undefined) {
+      try {
+        if (await this.options.respond.onCallback(data, chatId, scope.botId)) return
+      } catch (error) {
+        this.options.logger?.warn(`[tg] respond.onCallback failed: ${messageOf(error)}`)
+      }
+    }
     const menuCtx = this.options.menuCtxFor?.(chatId, scope.botId)
     if (menuCtx === undefined) {
       await delivery.sendFinal(chatId, '菜单不可用')

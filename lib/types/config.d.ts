@@ -128,5 +128,15 @@ export interface TelegramConfig {
     allowOpsRestart?: boolean;
     /** Plugin-wide default for per-bot `allowSharedSessions`. */
     allowSharedSessions?: boolean;
+    /**
+     * 把 DSH 的交互缝（user-questions/request、approval/request）转发到 Telegram
+     * 并从 Telegram 回收人工回答（全闭环）。挂起交互等待人回答的最长秒数，默认 300
+     * (5 分钟)；超过后调 next() 把该提示交还给宿主 GUI，不丢问题。
+     */
+    pendingQuestionTimeoutSec?: number;
+    /** 审批文本兜底「允许」词表（否则仅行内键盘按钮）。 */
+    approvalDecisionWords?: string[];
+    /** 审批文本兜底「拒绝」词表（否则仅行内键盘按钮）。 */
+    rejectDecisionWords?: string[];
 }
 export declare const Config: Schema<TelegramConfig>;

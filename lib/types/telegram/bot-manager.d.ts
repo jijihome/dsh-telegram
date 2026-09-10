@@ -32,6 +32,16 @@ export interface BotManagerOptions {
     defaultCwd: string;
     /** Build a MenuCtx for one (chat, bot) pair (injected from the plugin entry). */
     menuCtxFor?: (chatId: number, botId: string) => MenuCtx;
+    /**
+     * Hook to consume an inbound text / inline-keyboard callback as an answer to a
+     * pending interactive prompt (user-questions / approval forwarded to Telegram).
+     * Returning `true` means the update was consumed and must not fall through to
+     * the menu or the agent session.
+     */
+    respond?: {
+        onCallback(data: string, chatId: number, botId: string): Promise<boolean>;
+        onText(text: string, chatId: number, botId: string): Promise<boolean>;
+    };
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
