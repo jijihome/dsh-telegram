@@ -75,6 +75,13 @@ export interface TelegramConfig {
   maxMessageLength?: number
   /** Long-polling timeout in seconds. */
   pollingTimeoutSec?: number
+  /**
+   * Send a visible "✅ 完成" line when a turn ends normally (in addition to the
+   * streamed live answer). Off by default: a clean completion already closes the
+   * streamed message, so this only adds explicit end feedback. Interruption
+   * causes (cancel/error/blocked/max-tokens/interrupted) are ALWAYS surfaced.
+   */
+  notifyEnd?: boolean
   /** Base working directory roots for /workspace browsing. Defaults to process.cwd(). */
   workspaceRoots?: string[]
   /** Directory for persistent state (chat↔session map, offsets). Default: <cwd>/data. */
@@ -128,6 +135,7 @@ export const Config: Schema<TelegramConfig> = Schema.object({
   model: Schema.string(),
   maxMessageLength: Schema.number().default(4096),
   pollingTimeoutSec: Schema.number().default(30),
+  notifyEnd: Schema.boolean().default(false),
   workspaceRoots: Schema.array(Schema.string()),
   dataDir: Schema.string(),
   proxy: Schema.string(),

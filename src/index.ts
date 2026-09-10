@@ -33,7 +33,7 @@ import { assertSessionOwnership, resolveBotScopes, routeKey, type BotScope } fro
 import { BotManager, normalizeBots } from './telegram/bot-manager.js'
 import type { MenuCtx } from './telegram/menu.js'
 import { Delivery } from './telegram/delivery.js'
-import { getHostInfo, scheduleRestart } from './core/host.js'
+import { getHostInfo, scheduleRestart, readRestartMarker } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
@@ -67,6 +67,10 @@ export function apply(ctx: Context, config: TelegramConfig) {
   const defaultCwd = process.cwd()
   // DSH home: holds settings.yaml (host default model) and the profile stores.
   const dshHome = resolveDshHome(join(homedir(), '.dsh'))
+  // Cross-bot shared data root: holds the one-shot restart marker (and defaults
+  // per-bot subdirs live under it). Single source so the restart write and the
+  // boot-time "已上线" broadcast always agree on where the marker lives.
+  const dataDirRoot = () => config.dataDir ?? join(defaultCwd, 'data')
 
   // Direct-to-stderr logger so daemon diagnostics survive any Cordis log
   // routing/filtering in headless profiles.
@@ -250,7 +254,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
 
   // Stream listener: routes session events to the right bot's delivery.
   const deliveries = new Map<string, Delivery>()
-  const listener = new StreamListener({ ctx, sessions, deliveries, logger })
+  const listener = new StreamListener({ ctx, sessions, deliveries, logger, notifyEnd: config.notifyEnd ?? false })
 
   /** Read the host session roster (titles/cwd) without exposing it by itself. */
   const hostSessionRoster = async (): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>> => {
@@ -341,8 +345,10 @@ export function apply(ctx: Context, config: TelegramConfig) {
           return '⛔ 本 Bot 无权重启宿主 DSH(重启会同时停掉所有 Bot);如需开启,给该 Bot 设置 allowOpsRestart: true。'
         }
         try {
-          scheduleRestart({ delayMs: 3000 })
-          return '🔄 已请求重启 DSH,约 3 秒后自动重启(宿主进程将被重建)。'
+          // markerDir must match the "已上线" broadcast hook so the booted host
+          // can announce the restart. Cross-bot shared root, not a per-bot dir.
+          scheduleRestart({ delayMs: 3000, markerDir: dataDirRoot() })
+          return '⏳ 正在重启 DSH…约 10 秒后恢复。重启完成后我会再发一条「已上线」确认。(若超时仍未收到,可能重启失败,请查宿主日志)'
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `❌ 重启请求失败: ${msg}`
@@ -534,6 +540,36 @@ export function apply(ctx: Context, config: TelegramConfig) {
   listener.start()
   manager.start()
   attachDeliveries()
+
+  // Announce a plugin-triggered restart once the host is back online: a fresh
+  // restart marker (written before the previous host went down) means THIS boot
+  // came from an operator pressing "重启 DSH". Broadcast a short line to every
+  // chat that kept a session, then the marker is consumed. A manual host restart
+  // leaves no marker and stays silent.
+  const announceRestart = () => {
+    const marker = readRestartMarker(dataDirRoot())
+    if (marker === undefined) {
+      logger.warn('未检测到重启标记(手动启动或标记已过期),跳过「已上线」广播')
+      return
+    }
+    logger.warn(`检测到插件触发的重启(源于 PID ${marker.hostPid},${new Date(marker.at).toISOString()}),广播「已上线」`)
+    for (const scope of scopes) {
+      const delivery = deliveries.get(scope.botId)
+      const store = stores.get(scope.botId)
+      if (delivery === undefined || store === undefined) continue
+      // Only chats this bot owns with a persisted session get the notice.
+      for (const [key, chat] of Object.entries(store.allChats())) {
+        if (chat.sessionId === '' || chat.sessionId === undefined) continue
+        const colon = key.lastIndexOf(':')
+        const chatId = Number(colon >= 0 ? key.slice(colon + 1) : key)
+        if (!Number.isFinite(chatId)) continue
+        void delivery.sendFinal(chatId, '✅ DSH 已重新上线,会话已恢复。').catch((error: unknown) => {
+          logger.warn(`[tg] 「已上线」广播失败 chat=${chatId}: ${String(error)}`)
+        })
+      }
+    }
+  }
+  queueMicrotask(announceRestart)
 
   // Persist offsets periodically (debounced) and on unload — each bot into its
   // own file through its own store.

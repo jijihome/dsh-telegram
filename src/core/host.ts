@@ -13,6 +13,8 @@
 
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 /** Options for {@link scheduleRestart}. */
 export interface ScheduleRestartOptions {
@@ -23,6 +25,62 @@ export interface ScheduleRestartOptions {
    * everything is read from the live host process.
    */
   seam?: { hostPid?: number; nodePath?: string; upstreamArgv?: string[]; cwd?: string }
+  /**
+   * Directory to record a one-shot "restart requested" marker into, so the
+   * rebooted host can announce it came back online. Defaults to `<cwd>/data`.
+   */
+  markerDir?: string
+}
+
+/** Content of the one-shot restart marker written before the host goes down. */
+export interface RestartMarker {
+  /** Unix-epoch-ms of when the restart was scheduled. */
+  at: number
+  /** PID of the host that was scheduled to be killed. */
+  hostPid: number
+}
+
+/** Path of the one-shot restart marker file. */
+export function restartMarkerPath(markerDir: string): string {
+  return join(markerDir, 'restart-marker.json')
+}
+
+/**
+ * Record that a DSH restart was requested by this plugin. Written right before
+ * the host is scheduled down; the rebooted instance looks for a fresh marker
+ * and, when one is found, announces "已上线" over Telegram before deleting it.
+ * A marker that is too old (or from a manual host restart) is ignored.
+ */
+export function writeRestartMarker(markerDir: string, at = Date.now()): void {
+  try {
+    const dir = dirname(restartMarkerPath(markerDir))
+    mkdirSync(dir, { recursive: true })
+    const payload: RestartMarker = { at, hostPid: process.pid }
+    writeFileSync(restartMarkerPath(markerDir), JSON.stringify(payload), 'utf8')
+  } catch {
+    // A failed marker write must never break the restart itself.
+  }
+}
+
+/**
+ * Read and clear the one-shot restart marker. Returns the marker only when it
+ * was written recently (within `freshMs`, default 60s) — i.e. this host came
+ * back up because of a plugin-triggered restart, not a manual one.
+ */
+export function readRestartMarker(markerDir: string, freshMs = 60_000): RestartMarker | undefined {
+  const path = restartMarkerPath(markerDir)
+  try {
+    if (!existsSync(path)) return undefined
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as RestartMarker
+    if (typeof parsed?.at !== 'number') return undefined
+    const fresh = Date.now() - parsed.at <= freshMs
+    // Clear regardless of freshness so stale markers never linger or re-fire.
+    rmSync(path, { force: true })
+    return fresh ? parsed : undefined
+  } catch {
+    try { rmSync(path, { force: true }) } catch { /* best effort */ }
+    return undefined
+  }
 }
 
 /** Return a human-readable snapshot of the host process for the ops panel. */
@@ -53,6 +111,12 @@ export function scheduleRestart(options: ScheduleRestartOptions = {}): string {
   const nodePath = seam.nodePath ?? process.execPath
   const upstreamArgv = seam.upstreamArgv ?? process.argv.slice(1)
   const cwd = seam.cwd ?? process.cwd()
+
+  // Record that this host is going down for a plugin-triggered restart, so the
+  // rebooted instance can announce "已上线". A manual host restart leaves no
+  // marker and stays silent.
+  const markerDir = options.markerDir ?? join(cwd, 'data')
+  writeRestartMarker(markerDir)
 
   // Resolve the agent script path from this module's own location.
   const agentPath = fileURLToPath(new URL('./host-agent.js', import.meta.url))

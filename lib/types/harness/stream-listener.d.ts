@@ -19,6 +19,12 @@ export interface StreamListenerOptions {
     sessions: SessionManager;
     /** One delivery per bot, keyed by bot id. */
     deliveries: ReadonlyMap<string, Delivery>;
+    /**
+     * Send a visible "✅ 完成" line on a clean `turn/end`. Defaults to false; the
+     * streamed live answer already marks a normal completion, so this only adds
+     * explicit end feedback. Interruption causes are always surfaced regardless.
+     */
+    notifyEnd?: boolean;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -29,6 +35,7 @@ export declare class StreamListener {
     private readonly ctx;
     private readonly sessions;
     private readonly deliveries;
+    private readonly notifyEnd;
     private readonly logger;
     private disposer;
     /**

@@ -67,6 +67,7 @@ dsh --profile <name> --dump-config | grep telegram
 | `provider` / `model` | 未设置 = 跟随宿主默认模型 | 各 Bot 的默认 LLM 选择;设置后为固定值(可按 Bot 覆盖) |
 | `maxMessageLength` | `4096` | 消息长度上限 |
 | `pollingTimeoutSec` | `30` | 长轮询超时(秒) |
+| `notifyEnd` | `false` | 回合**自然结束(成功完成)**时额外发一条可见的「✅ 完成」。中断类原因(cancel/error/blocked/max-tokens/interrupted)无论开关**始终**通知 |
 | `workspaceRoots` | `[cwd]` | /workspace 可浏览的根目录 |
 | `dataDir` | `<DSH_HOME>/plugin-data/dsh-telegram` | 每 Bot 状态根目录(实际写入 `<dataDir>/bots/<botId>/`) |
 | `allowHostSessions` | `false` | 是否允许各 Bot 枚举/附加宿主的全部会话与工作区 |
@@ -113,7 +114,7 @@ dsh --profile <name> --dump-config | grep telegram
 菜单 / 运维:
 | 项 | 说明 |
 | --- | --- |
-| 🔄 重启 DSH | 重启宿主 dsh 进程。spawn 一个 detached 重启代理,等 3 秒(让确认消息送达)后 kill 宿主 PID 并以原启动命令重建。**仅白名单用户可用** |
+| 🔄 重启 DSH | 重启宿主 dsh 进程。spawn 一个 detached 重启代理,等 3 秒(让确认消息送达)后 kill 宿主 PID 并以原启动命令重建。**仅白名单用户可用**。重启前写一次性「重启标记」;宿主重建后插件检测到该标记,会向每个持有会话的 chat 广播「✅ DSH 已重新上线,会话已恢复。」,并删除标记(手动启动宿主不广播)。重启提示形成 ⏳ 正在重启 → ✅ 已上线 的完整闭环 |
 | 💻 系统信息 | 显示宿主进程 PID / Node 版本 / 启动命令 / 工作目录 |
 
 ## 架构

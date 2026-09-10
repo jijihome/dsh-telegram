@@ -25,6 +25,12 @@ export interface StreamListenerOptions {
   sessions: SessionManager
   /** One delivery per bot, keyed by bot id. */
   deliveries: ReadonlyMap<string, Delivery>
+  /**
+   * Send a visible "✅ 完成" line on a clean `turn/end`. Defaults to false; the
+   * streamed live answer already marks a normal completion, so this only adds
+   * explicit end feedback. Interruption causes are always surfaced regardless.
+   */
+  notifyEnd?: boolean
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -33,6 +39,7 @@ export class StreamListener {
   private readonly ctx: Context
   private readonly sessions: SessionManager
   private readonly deliveries: ReadonlyMap<string, Delivery>
+  private readonly notifyEnd: boolean
   private readonly logger: StreamListenerOptions['logger'] | undefined
   private disposer: (() => void) | undefined
   /**
@@ -47,6 +54,7 @@ export class StreamListener {
     this.ctx = options.ctx
     this.sessions = options.sessions
     this.deliveries = options.deliveries
+    this.notifyEnd = options.notifyEnd ?? false
     this.logger = options.logger
   }
 
@@ -230,6 +238,9 @@ export class StreamListener {
           delivery.resetStream(chatId)
         } else if (message.status === 'done') {
           await delivery.endLive(chatId)
+          // Clean completion: end the live segment, and optionally send an
+          // explicit end line so the bot always knows the turn finished.
+          if (this.notifyEnd) await delivery.sendFinal(chatId, renderStatus('done'))
         } else {
           // Terminal interruption: flush any live partial, then report the cause.
           await delivery.endLive(chatId)

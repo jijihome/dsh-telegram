@@ -24,7 +24,34 @@ export interface ScheduleRestartOptions {
         upstreamArgv?: string[];
         cwd?: string;
     };
+    /**
+     * Directory to record a one-shot "restart requested" marker into, so the
+     * rebooted host can announce it came back online. Defaults to `<cwd>/data`.
+     */
+    markerDir?: string;
 }
+/** Content of the one-shot restart marker written before the host goes down. */
+export interface RestartMarker {
+    /** Unix-epoch-ms of when the restart was scheduled. */
+    at: number;
+    /** PID of the host that was scheduled to be killed. */
+    hostPid: number;
+}
+/** Path of the one-shot restart marker file. */
+export declare function restartMarkerPath(markerDir: string): string;
+/**
+ * Record that a DSH restart was requested by this plugin. Written right before
+ * the host is scheduled down; the rebooted instance looks for a fresh marker
+ * and, when one is found, announces "已上线" over Telegram before deleting it.
+ * A marker that is too old (or from a manual host restart) is ignored.
+ */
+export declare function writeRestartMarker(markerDir: string, at?: number): void;
+/**
+ * Read and clear the one-shot restart marker. Returns the marker only when it
+ * was written recently (within `freshMs`, default 60s) — i.e. this host came
+ * back up because of a plugin-triggered restart, not a manual one.
+ */
+export declare function readRestartMarker(markerDir: string, freshMs?: number): RestartMarker | undefined;
 /** Return a human-readable snapshot of the host process for the ops panel. */
 export declare function getHostInfo(): string;
 /**

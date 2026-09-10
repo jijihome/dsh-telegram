@@ -110,6 +110,28 @@ test('turn/end(completed) still ends the live stream, no terminal message', () =
   assert.equal(delivery.ended(), 1, 'endLive should flush the live segment on completion')
 })
 
+test('turn/end(completed) with notifyEnd sends an explicit done line', async () => {
+  const ctx = fakeCtx()
+  const delivery = fakeDelivery()
+  const deliveries = new Map([['bot-a', delivery]])
+  const listener = new StreamListener({
+    ctx,
+    sessions: fakeSessions(10, 'bot-a'),
+    deliveries,
+    notifyEnd: true,
+    logger: { warn() {}, error() {} },
+  })
+  listener.start()
+
+  ctx.handlers['session/event']({ id: 'telegram:bot-a:10' }, {
+    type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } },
+  })
+  await flush()
+
+  assert.equal(delivery.sent.length, 1, 'notifyEnd adds a visible done line')
+  assert.equal(delivery.sent[0], '✅ 完成')
+})
+
 test('interrupted assistant message is flagged with a prefix', async () => {
   const { ctx, delivery } = build()
   const sessionEvent = ctx.handlers['session/event']
