@@ -399,7 +399,11 @@ export class SessionManager {
     const key = routeKey(botId, chatId)
     const previous = this.bindings.get(key)
     const generation = (previous?.generation ?? 0) + 1
-    const cwd = previous?.cwd ?? this.chatCwd(chatId, botId)
+    // The PERSISTED chat cwd is authoritative. The workspace picker only writes
+    // the store (`setCwd`) and never touches the live binding, so reusing
+    // `previous.cwd` here opened the fresh session in the directory the user had
+    // just switched away from.
+    const cwd = this.chatCwd(chatId, botId)
     const hadBinding = this.unbind(chatId, botId)
     const binding = await this.create(key, chatId, botId, cwd, generation, 'fresh')
     if (previous !== undefined) {
@@ -409,6 +413,9 @@ export class SessionManager {
       })
     }
     if (hadBinding) this.logger?.warn(`[tg] /new cleared config binding for ${key}`)
+    this.logger?.warn(
+      `[tg] /new rotate ${key}: ${previous?.sessionId ?? '(none)'} -> ${binding.sessionId} cwd=${cwd}`,
+    )
     return binding
   }
 

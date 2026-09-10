@@ -137,20 +137,36 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
   }
 }
 
+/** Shared confirmation for a fresh session (新建/清除 both rotate). */
+function rotatedText(
+  title: string,
+  binding: { sessionId: string; cwd: string },
+  previousSessionId: string | undefined,
+): string {
+  const lines = [title, `• 新会话: ${binding.sessionId}`, `• 工作目录: ${binding.cwd}`]
+  if (previousSessionId !== undefined && previousSessionId !== '' && previousSessionId !== binding.sessionId) {
+    lines.push(`• 已丢弃: ${previousSessionId}`)
+  }
+  lines.push('下一条消息即在新会话中进行;可在「📊 状态」核对。')
+  return lines.join('\n')
+}
+
 /** New (rotate to a fresh session). */
 async function doNew(ctx: MenuCtx): Promise<MenuResult> {
+  const previousSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
   const binding = await ctx.sessions.rotate(ctx.chatId, ctx.botId)
   return {
-    text: `✅ 已开启新会话\n• session: ${binding.sessionId}`,
+    text: rotatedText('✅ 已开启新会话', binding, previousSessionId),
     keyboard: mainMenuKeyboard(),
   }
 }
 
 /** Clear (rotate a fresh session, same as new for now). */
 async function doClear(ctx: MenuCtx): Promise<MenuResult> {
+  const previousSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
   const binding = await ctx.sessions.rotate(ctx.chatId, ctx.botId)
   return {
-    text: `🧹 已清除会话，开启新会话\n• session: ${binding.sessionId}`,
+    text: rotatedText('🧹 已清除会话，开启新会话', binding, previousSessionId),
     keyboard: mainMenuKeyboard(),
   }
 }
