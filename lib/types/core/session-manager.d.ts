@@ -222,6 +222,12 @@ export declare class SessionManager {
     rotate(chatId: number, botId: string): Promise<SessionBinding>;
     /** Cancel the chat's current turn (`/stop`); no-op when idle. */
     cancel(chatId: number, botId: string): boolean;
+    /**
+     * Effective agent preset id for one route: the chat's 工作方式 pick first,
+     * else the host default (`agentPresets.default`). Shared by every path that
+     * starts or resumes an agent so none of them can ship an empty tool world.
+     */
+    private presetIdFor;
     /** Send a user text into the chat's agent (queued as a normal follow-up). */
     followup(chatId: number, botId: string, text: string, onError?: (error: unknown) => void): void;
     /**
@@ -264,6 +270,25 @@ export declare class SessionManager {
     setPreset(chatId: number, botId: string, presetId: string): void;
     /** Persist a chat's working directory in its bot's own store. */
     setCwd(chatId: number, botId: string, cwd: string): void;
+    /**
+     * Switch this chat's working directory, DETACHING its current session.
+     *
+     * The user's intent when picking a new working directory is to start fresh
+     * there, NOT to keep driving the conversation that belongs to the previous
+     * directory. So this:
+     *  - persists the new `cwd` (and keeps model / preset / botId);
+     *  - clears the persisted session id and marks the chat as explicitly
+     *    detached (`sessionDetached`), so `activeSessionId()` returns undefined;
+     *  - removes any config/live binding for the route;
+     *  - disposes only the chat's OWN live agent (never a bound foreign session).
+     *
+     * The next ordinary message therefore routes to the session-selection menu
+     * (create / choose) instead of resuming the old conversation. Selecting the
+     * same directory is a no-op, so a stray repress cannot throw the chat off a
+     * session it is mid-conversation on. Returns true when the chat was detached
+     * (i.e. it had a session that was released), false for a no-op.
+     */
+    switchCwd(chatId: number, botId: string, cwd: string): Promise<boolean>;
     /** Dispose every live binding (plugin unload). */
     disposeAll(): Promise<void>;
     /** Create a fresh session (mode `fresh`) or resume the persisted one. */

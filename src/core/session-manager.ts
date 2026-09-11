@@ -134,6 +134,16 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * Path equality insensitive to separators and case. Workspace picker spells
+ * directories differently (D:\repos vs d:/repos), so a same-directory switch
+ * must compare normalized forms.
+ */
+function sameDir(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
+  return norm(a) === norm(b)
+}
+
+/**
  * True when the host refused a session id because that session already exists on
  * disk (typically one minted by an earlier host run, invisible to our in-memory
  * generation counter). Matched by error name first, message as a fallback.
@@ -225,11 +235,17 @@ export class SessionManager {
    * be resumed (it looked like the session was lost, while the id was intact).
    */
   activeSessionId(chatId: number, botId: string): string | undefined {
+    // An EXPLICIT detach (workspace switch) wins over every source below: the
+    // chat deliberately released its conversation and must stay sessionless
+    // until the user picks or creates one. Guards against any write path that
+    // preserves a stale session id alongside the detach marker.
+    const state = this.storeFor(botId).getChat(routeKey(botId, chatId))
+    if (state?.sessionDetached === true) return undefined
     const bound = this.getBound(chatId, botId)?.sessionId
     if (bound !== undefined && bound !== '') return bound
     const live = this.bindings.get(routeKey(botId, chatId))?.sessionId
     if (live !== undefined && live !== '') return live
-    const persisted = this.storeFor(botId).getChat(routeKey(botId, chatId))?.sessionId
+    const persisted = state?.sessionId
     return persisted !== undefined && persisted !== '' ? persisted : undefined
   }
 
@@ -309,6 +325,9 @@ export class SessionManager {
       sessionId,
       cwd,
       botId: owner,
+      // Binding (config or menu pick) re-attaches the chat: clear any leftover
+      // workspace-switch detach marker so the choice is authoritative.
+      sessionDetached: false,
     })
     store.flush()
     this.logger?.warn(`[tg] bound chat ${key} -> ${sessionId}`)
@@ -386,12 +405,23 @@ export class SessionManager {
       if (agent === undefined) {
         this.logger?.warn(`[tg] bound session ${bound.sessionId} not live; resuming`)
         const model = this.modelFor(chatId, botId)
+        // Our own sessions must re-join their preset on this resume path too.
+        // `create()` already did, but a chat that picked one of OUR sessions
+        // from the 会话 menu (e.g. after a workspace switch, or right after a
+        // restart) drives it through THIS method — without the mount the
+        // resumed conversation ran with an EMPTY tool world (no read/pwsh/…),
+        // the exact regression dd5cbac fixed for the other paths.
+        // Foreign (GUI) sessions keep the composition their creator mounted.
+        const presetId = this.presetIdFor(chatId, botId)
         const handle = await this.factory.resume({
           sessionId: bound.sessionId as SessionId,
           cwd: bound.cwd,
           provider: model.provider,
           model: model.model,
           routeKey: key,
+          ...(isOwnSessionId(bound.sessionId) && presetId !== undefined && presetId !== ''
+            ? { agentPreset: presetId }
+            : {}),
         })
         agent = handle.agent
       }
@@ -468,6 +498,16 @@ export class SessionManager {
     if (binding === undefined) return false
     binding.handle.agent.cancel({ kind: 'user' })
     return true
+  }
+
+  /**
+   * Effective agent preset id for one route: the chat's 工作方式 pick first,
+   * else the host default (`agentPresets.default`). Shared by every path that
+   * starts or resumes an agent so none of them can ship an empty tool world.
+   */
+  private presetIdFor(chatId: number, botId: string): string | undefined {
+    const chosen = this.storeFor(botId).getChat(routeKey(botId, chatId))?.agentPreset
+    return chosen !== undefined && chosen !== '' ? chosen : this.defaultPresetId?.()
   }
 
   /** Send a user text into the chat's agent (queued as a normal follow-up). */
@@ -590,6 +630,65 @@ export class SessionManager {
     store.flush()
   }
 
+  /**
+   * Switch this chat's working directory, DETACHING its current session.
+   *
+   * The user's intent when picking a new working directory is to start fresh
+   * there, NOT to keep driving the conversation that belongs to the previous
+   * directory. So this:
+   *  - persists the new `cwd` (and keeps model / preset / botId);
+   *  - clears the persisted session id and marks the chat as explicitly
+   *    detached (`sessionDetached`), so `activeSessionId()` returns undefined;
+   *  - removes any config/live binding for the route;
+   *  - disposes only the chat's OWN live agent (never a bound foreign session).
+   *
+   * The next ordinary message therefore routes to the session-selection menu
+   * (create / choose) instead of resuming the old conversation. Selecting the
+   * same directory is a no-op, so a stray repress cannot throw the chat off a
+   * session it is mid-conversation on. Returns true when the chat was detached
+   * (i.e. it had a session that was released), false for a no-op.
+   */
+  async switchCwd(chatId: number, botId: string, cwd: string): Promise<boolean> {
+    const key = routeKey(botId, chatId)
+    if (sameDir(cwd, this.chatCwd(chatId, botId))) {
+      // Same directory (case/separator-insensitive): keep the current session.
+      return false
+    }
+    const hadSession = this.activeSessionId(chatId, botId) !== undefined
+    // Release the live binding for this route first (unbinds config + live).
+    const previous = this.bindings.get(key)
+    this.unbind(chatId, botId)
+    // Drop the LIVE binding entry too. Disposing the agent without deleting the
+    // map entry left a stale record behind: `activeSessionId()` kept reporting
+    // the released session and `getOrCreate()` returned the disposed handle, so
+    // the chat silently continued driving a dead conversation.
+    this.bindings.delete(key)
+    if (previous !== undefined) {
+      this.relevant.delete(previous.sessionId)
+      // Detach only sessions this chat CREATED. A config-bound or menu-picked
+      // foreign session (e.g. a GUI conversation) must never be torn down by a
+      // workspace switch — the config/menu binding is dropped, the agent stays.
+      if (previous.botId === botId) {
+        await previous.handle.dispose().catch(error => {
+          this.logger?.warn(`[tg] switchCwd dispose旧 agent 失败: ${messageOf(error)}`)
+        })
+      }
+    }
+    // Clear the persisted selection but keep cwd / model / preset / botId.
+    const store = this.storeFor(botId)
+    const current = store.getChat(key)
+    store.setChat(key, {
+      ...(current ?? {}),
+      sessionId: '',
+      cwd,
+      botId,
+      sessionDetached: true,
+    } satisfies ChatState)
+    store.flush()
+    this.logger?.warn(`[tg] switchCwd ${key}: 已切换工作目录到 ${cwd},释放会话${hadSession ? '' : '(本无会话)'}`)
+    return hadSession
+  }
+
   /** Dispose every live binding (plugin unload). */
   async disposeAll(): Promise<void> {
     const handles = [...this.bindings.values()].map(binding => binding.handle)
@@ -614,10 +713,7 @@ export class SessionManager {
     // A fresh session created WITHOUT one has no tools at all — no shell, no file
     // access — so always resolve one: the chat's 工作方式 pick first, else the
     // host default (`agentPresets.default`).
-    const chosenPreset = persisted?.agentPreset
-    const presetId = chosenPreset !== undefined && chosenPreset !== ''
-      ? chosenPreset
-      : this.defaultPresetId?.()
+    const presetId = this.presetIdFor(chatId, botId)
     let handle: AgentHandle
     let sessionId: string
     // A persisted session whose agent is ALREADY live in this process (e.g. a GUI
@@ -670,6 +766,10 @@ export class SessionManager {
       sessionId,
       cwd,
       botId,
+      // A create (fresh or resume) re-attaches this chat to a conversation:
+      // clear the workspace-switch detach marker so `activeSessionId()` trusts
+      // the new session id again.
+      sessionDetached: false,
     } satisfies ChatState)
     store.flush()
     const binding: SessionBinding = {

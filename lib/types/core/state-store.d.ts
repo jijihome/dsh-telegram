@@ -33,6 +33,8 @@ export interface ChatState {
     modelSessionId?: string;
     /** Per-chat work-mode preset id (applied when a fresh session is created). */
     agentPreset?: string;
+    /** True after a workspace switch detaches the previous conversation. */
+    sessionDetached?: boolean;
 }
 export interface StateStoreOptions {
     /** Root directory holding the per-bot state (default `<cwd>/data`). */

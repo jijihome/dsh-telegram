@@ -61,6 +61,8 @@ export declare function normalizeBots(bots: BotConfig[], token?: string): BotCon
 export declare class BotManager {
     private readonly options;
     private readonly runtimes;
+    /** Pending startup-network retries keyed by bot id (cleared on stop). */
+    private readonly startupTimers;
     private started;
     constructor(options: BotManagerOptions);
     /** Ready-to-use runtimes (only successfully started bots), keyed by bot id. */
@@ -71,6 +73,8 @@ export declare class BotManager {
     stop(): Promise<void>;
     /** Launch one bot: client + delivery + poll, verify token async, wire updates. */
     private launch;
+    /** getMe → (offset restore + poll.start + menu UI). Re-armed on transport failure. */
+    private verifyAndStart;
     /** Route one Telegram update: authorize, then command or agent follow-up. */
     private handleUpdate;
     /**

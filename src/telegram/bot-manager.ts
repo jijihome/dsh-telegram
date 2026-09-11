@@ -28,7 +28,7 @@ import type { TelegramUpdate, TelegramCallbackQuery } from './api.js'
 import type { CommandContext } from '../commands/index.js'
 import { handleCommand } from '../commands/index.js'
 import type { SessionManager } from '../core/session-manager.js'
-import { handleMenuCallback, mainMenuKeyboard, mainMenuText, type MenuCtx } from './menu.js'
+import { handleMenuCallback, mainMenuKeyboard, mainMenuText, sessionChoiceMenu, type MenuCtx } from './menu.js'
 import { registerBotUi } from './bot-commands.js'
 
 export interface BotManagerOptions {
@@ -75,6 +75,8 @@ const messageOf = (error: unknown): string => error instanceof Error ? error.mes
 export class BotManager {
   private readonly options: BotManagerOptions
   private readonly runtimes = new Map<string, BotRuntime>()
+  /** Pending startup-network retries keyed by bot id (cleared on stop). */
+  private readonly startupTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private started = false
 
   constructor(options: BotManagerOptions) {
@@ -103,6 +105,10 @@ export class BotManager {
   /** Stop every bot (plugin unload / dispose). */
   async stop(): Promise<void> {
     this.started = false
+    // Cancel any pending startup-network retries so a late getMe cannot fire
+    // after shutdown and start a bot the operator just stopped.
+    for (const timer of this.startupTimers.values()) clearTimeout(timer)
+    this.startupTimers.clear()
     const polls = [...this.runtimes.values()].map(runtime => runtime.poll.stop())
     await Promise.allSettled(polls)
     // Dispose each client's proxy connection pool, if one was created.
@@ -141,7 +147,22 @@ export class BotManager {
     })
     runtime.poll = poll
 
-    void client.getMe().then(me => {
+    // Startup token/network check. Only after it passes does the long-poll
+    // start; a network/proxy timeout here must NOT leave the bot silently dead
+    // (its getUpdates never runs, offset stalls, inbound messages pile up on the
+    // Telegram server). So a transport failure is retried with backoff; only a
+    // real token/API error (e.g. 401) is treated as permanent.
+    void this.verifyAndStart(runtime, 0)
+    return runtime
+  }
+
+  /** getMe → (offset restore + poll.start + menu UI). Re-armed on transport failure. */
+  private async verifyAndStart(runtime: BotRuntime, attempt: number): Promise<void> {
+    const { scope, client, poll } = runtime
+    this.startupTimers.delete(scope.botId)
+    try {
+      const me = await client.getMe()
+      const logger = this.options.logger
       logger?.warn(`[tg] bot "${scope.botId}" online: @${me.username ?? me.id}`)
       // Restore the persisted offset after the token check passes.
       poll.restoreOffset(this.options.sessions.storeFor(scope.botId).getOffset(scope.botId))
@@ -150,15 +171,31 @@ export class BotManager {
       registerBotUi(client).catch(error => {
         logger?.warn(`[tg] bot "${scope.botId}" bot UI registration failed (non-fatal): ${messageOf(error)}`)
       })
-    }).catch(error => {
+    } catch (error) {
       runtime.lastError = messageOf(error)
-      // Transport failures ("network down", proxy, DNS…) must not be blamed
-      // on the token; only an HTTP/API error such as 401 makes the token
-      // itself invalid.
-      const label = error instanceof TelegramTransportError ? 'startup network check failed' : 'token invalid'
-      logger?.error(`[tg] bot "${scope.botId}" ${label}: ${runtime.lastError}`)
-    })
-    return runtime
+      const transport = error instanceof TelegramTransportError
+      const label = transport ? 'startup network check failed' : 'token invalid'
+      this.options.logger?.error(`[tg] bot "${scope.botId}" ${label} (attempt ${attempt + 1}): ${runtime.lastError}`)
+      // Network/proxy trouble is transient — keep trying so the bot recovers on
+      // its own instead of staying dead until a manual host restart. A hard
+      // token error (401 etc) is not retried: it can never succeed until config
+      // changes.
+      if (transport && !this.started) {
+        this.options.logger?.warn(`[tg] bot "${scope.botId}" startup deferred (plugin stopping)`)
+        return
+      }
+      if (transport && this.started) {
+        // Backoff capped at 30s so a long outage does not hammer the API.
+        const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30000)
+        this.options.logger?.warn(`[tg] bot "${scope.botId}" will retry startup in ${delay}ms`)
+        this.startupTimers.set(scope.botId, setTimeout(() => {
+          void this.verifyAndStart(runtime, attempt + 1)
+        }, delay))
+      } else if (!transport) {
+        // Permanent (token invalid) — nothing to do; the runtime stays marked
+        // with lastError and is simply not polling.
+      }
+    }
   }
 
   /** Route one Telegram update: authorize, then command or agent follow-up. */
@@ -232,7 +269,12 @@ export class BotManager {
     if (text.trim() === '') return
 
     // Otherwise: if the chat is bound to an existing session, follow up on it;
-    // else bind the chat to its own agent and follow up.
+    // else decide based on whether it has ANY active session. A chat with a
+    // session drives it; a chat with NO session (e.g. after a workspace switch
+    // released its old one, or a brand-new chat) is shown the session-selection
+    // menu with a New Session button instead of silently auto-creating — the
+    // user chose the working directory, and must now pick or start the
+    // conversation there.
     try {
       const bound = this.options.sessions.getBound(chatId, scope.botId)
       if (bound !== undefined) {
@@ -244,7 +286,21 @@ export class BotManager {
         })
         return
       }
-      this.options.logger?.warn(`[tg] unbound msg chat=${chatId}(${scope.botId}); creating own session`)
+      const active = this.options.sessions.activeSessionId(chatId, scope.botId)
+      if (active === undefined) {
+        this.options.logger?.warn(`[tg] 无会话 msg chat=${chatId}(${scope.botId}); 发会话选择菜单`)
+        const menuCtx = this.options.menuCtxFor?.(chatId, scope.botId)
+        if (menuCtx !== undefined) {
+          menuCtx.userId = message.from?.id ?? 0
+          menuCtx.canOperate = this.isAllowed(scope, menuCtx.userId)
+          const choice = await sessionChoiceMenu(menuCtx)
+          await delivery.sendMenu(chatId, choice.text, choice.keyboard)
+        } else {
+          await delivery.sendMenu(chatId, await mainMenuText(), mainMenuKeyboard())
+        }
+        return
+      }
+      this.options.logger?.warn(`[tg] unbound-but-session msg chat=${chatId}(${scope.botId}); 驱动会话 ${active}`)
       await this.options.sessions.getOrCreate(chatId, scope.botId)
       delivery.startTyping(chatId)
       this.options.sessions.followup(chatId, scope.botId, text, error => {

@@ -81,6 +81,8 @@ export class PendingStore {
       try { pending.onTimeout?.() } catch { /* 超时清理不得抛 */ }
       pending.resolve(undefined)
     }, timeoutMs)
+    // unref: 超时定时器不得拽住进程事件循环（测试进程/宿主关停时能立即退出）。
+    pending.timer.unref?.()
     return pending
   }
 

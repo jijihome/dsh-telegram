@@ -64,9 +64,17 @@ test('会话菜单: 过长标题截断加省略号', async () => {
   assert.ok(!res.text.includes(long), '不应出现未截断的完整标题')
 })
 
-test('会话菜单: 当前目录无会话时的引导文案', async () => {
+test('会话菜单: 当前目录无会话时的引导文案 + 始终有「🆕 新建会话」按钮', async () => {
   const res = await handleMenuCallback('menu:sessions', fakeCtx({ list: [], active: undefined }))
-  assert.ok(res.text.includes('当前目录下暂无会话'))
+  assert.ok(res.text.includes('下暂无会话'), `应提示目录内无会话, 实际:\n${res.text}`)
+  const flat = res.keyboard.inline_keyboard.flat().map(b => b.text)
+  assert.ok(flat.includes('🆕 新建会话'), '空目录也必须给新建会话按钮(不能没有出路)')
+})
+
+test('会话菜单: 有会话时同样携带「🆕 新建会话」按钮(无会话消息弹出即可选)', async () => {
+  const res = await handleMenuCallback('menu:sessions', fakeCtx({ list: sessionList(), active: 'session-aaa' }))
+  const flat = res.keyboard.inline_keyboard.flat().map(b => b.text)
+  assert.ok(flat.includes('🆕 新建会话'), '选择列表必须能直接新建会话')
 })
 
 test('切换会话确认文案显示标题 + 时间, 不再显示裸 id', async () => {

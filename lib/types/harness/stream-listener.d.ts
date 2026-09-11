@@ -120,7 +120,13 @@ export declare class StreamListener {
     private armStallWatch;
     /** B: clear the stall watchdog (turn closed, or a newer turn took over). */
     private cancelStallWatch;
-    /** End the live segment and report an agent-level failure to the bot. */
+    /**
+     * End the live segment and report an agent-level failure to the bot.
+     *
+     * This is the fallback for a driver-level error that never produced a
+     * `turn/end` (network loss, host-side failure), so it must also stop the typing
+     * keep-alive — otherwise the "typing…" indicator would spin forever.
+     */
     private applyAgentFailure;
     /** Apply one normalized message to the chat's delivery. */
     private apply;

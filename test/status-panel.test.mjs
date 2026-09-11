@@ -56,8 +56,9 @@ test('状态: 名单里查不到该会话时回退显示 id(不崩)', async () =
   assert.ok(text.includes('telegram:bot-a:1:g99'), '查不到时回退到 id')
 })
 
-test('状态: 无任何会话时提示尚未创建', async () => {
+test('状态: 无任何会话时提示尚未选择(发消息弹会话选择列表)', async () => {
   const ctx = baseCtx({ get: () => undefined, getBound: () => undefined, activeSessionId: () => undefined }, { roster: [] })
   const text = await mainMenuText(ctx)
-  assert.ok(text.includes('尚未创建会话'))
+  assert.ok(text.includes('尚未选择会话'), text)
+  assert.ok(text.includes('会话选择列表'), '提示发消息会弹出会话选择列表')
 })

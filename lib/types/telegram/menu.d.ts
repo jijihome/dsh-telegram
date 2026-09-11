@@ -63,7 +63,14 @@ export interface MenuCtx {
     switchSession(sessionId: string, cwd?: string): Promise<void>;
     /** This chat's currently selected working directory (persisted cwd or default). */
     currentCwd(): string;
-    /** Persist this chat's working directory (merge + flush). */
+    /**
+     * Switch this chat's working directory, releasing its current session so the
+     * next message asks the user to create/choose one in the new directory.
+     * Selection of the same directory is a no-op. Returns whether a session was
+     * actually detached.
+     */
+    switchCwd(cwd: string): Promise<boolean>;
+    /** Persist this chat's working directory (merge + flush) without detaching. */
     setCurrentCwd(cwd: string): void;
     /** Return a host-process snapshot for the ops info panel. */
     getHostInfo(): string;
@@ -98,6 +105,21 @@ export declare function mainMenuText(ctx?: MenuCtx): Promise<string>;
 export declare function mainMenuKeyboard(): TelegramInlineKeyboard;
 /** Handle one callback `data`. Returns the text + keyboard to send/show. */
 export declare function handleMenuCallback(data: string, ctx: MenuCtx): Promise<MenuResult>;
+/**
+ * Build the session-selection menu for a chat: the sessions THAT BELONG TO the
+ * chat's current working directory (time + title rows), scoped to that
+ * directory, PLUS an always-visible 「🆕 新建会话」 button.
+ *
+ * This is what an ordinary message triggers when the chat has no active
+ * session (e.g. right after a workspace switch): ask the user to create a new
+ * session or pick an existing one in the current directory rather than
+ * silently auto-creating or resuming.
+ *
+ * The directory is the boundary of the list: a session from another directory
+ * is never shown here. When the chat's active session lives in another
+ * directory the header says so instead of inventing a row for it.
+ */
+export declare function sessionChoiceMenu(ctx: MenuCtx): Promise<MenuResult>;
 /**
  * Scope a roster to one working directory (newest first) and report whether the
  * chat's active session is part of that scope.

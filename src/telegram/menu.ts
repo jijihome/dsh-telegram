@@ -46,7 +46,14 @@ export interface MenuCtx {
   switchSession(sessionId: string, cwd?: string): Promise<void>
   /** This chat's currently selected working directory (persisted cwd or default). */
   currentCwd(): string
-  /** Persist this chat's working directory (merge + flush). */
+  /**
+   * Switch this chat's working directory, releasing its current session so the
+   * next message asks the user to create/choose one in the new directory.
+   * Selection of the same directory is a no-op. Returns whether a session was
+   * actually detached.
+   */
+  switchCwd(cwd: string): Promise<boolean>
+  /** Persist this chat's working directory (merge + flush) without detaching. */
   setCurrentCwd(cwd: string): void
   /** Return a host-process snapshot for the ops info panel. */
   getHostInfo(): string
@@ -354,7 +361,7 @@ async function statusText(ctx: MenuCtx): Promise<string> {
     const active = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
     lines.push(active !== undefined
       ? `• 会话: ${label(active)}（上次会话,首条消息时恢复）`
-      : '• 尚未创建会话(发消息即建)')
+      : '• 尚未选择会话(发消息将弹出会话选择列表)')
   }
   lines.push(`• 工作目录: ${cwd}`)
   lines.push(`• 工作方式: ${workMode}`)
@@ -448,6 +455,24 @@ function formatTime(ms: number): string {
  * another directory the header says so instead of inventing a row for it.
  */
 async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
+  return sessionChoiceMenu(ctx)
+}
+
+/**
+ * Build the session-selection menu for a chat: the sessions THAT BELONG TO the
+ * chat's current working directory (time + title rows), scoped to that
+ * directory, PLUS an always-visible 「🆕 新建会话」 button.
+ *
+ * This is what an ordinary message triggers when the chat has no active
+ * session (e.g. right after a workspace switch): ask the user to create a new
+ * session or pick an existing one in the current directory rather than
+ * silently auto-creating or resuming.
+ *
+ * The directory is the boundary of the list: a session from another directory
+ * is never shown here. When the chat's active session lives in another
+ * directory the header says so instead of inventing a row for it.
+ */
+export async function sessionChoiceMenu(ctx: MenuCtx): Promise<MenuResult> {
   let list: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>
   try {
     list = await ctx.listSessions()
@@ -457,10 +482,13 @@ async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
   const currentCwd = ctx.currentCwd()
   const activeSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
   const { scoped, activeInScope } = scopeSessionsToDir(list, currentCwd, activeSessionId)
+  // The keyboard always carries 「🆕 新建会话」even when the directory has no
+  // sessions, so the user is never left without a path forward.
+  const newButton: [string, string] = ['🆕 新建会话', 'menu:new']
   if (scoped.length === 0) {
     return {
-      text: `💬 当前目录下暂无会话\n工作目录: ${currentCwd}\n(先用 📂 工作目录 切到目标目录,再从此处选择会话)`,
-      keyboard: mainMenuKeyboard(),
+      text: `💬 当前目录 \`${currentCwd}\` 下暂无会话\n(先点「🆕 新建会话」在该目录开新会话,或用 📂 工作目录 切换目录)`,
+      keyboard: keyboard([[newButton], [['🔙 返回上级', BACK]]]),
     }
   }
   // 与模型菜单同款：上方按时间分组（组名加粗）的唯一序号列表，下方序号按钮。
@@ -486,10 +514,10 @@ async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
   })
 
   const awayNote = activeSessionId !== undefined && !activeInScope
-    ? '\n(本 chat 已选会话属于其它目录,故此处无 ✅;点 📂 工作目录 回到该目录即可看到)'
+    ? '\n(会话属于其它目录,故此处无 ✅;点 📂 工作目录 回到该目录即可看到)'
     : ''
   const textLines = [`💬 **选择会话**（当前目录 \`${currentCwd}\` · 命中 ${scoped.length} 条）${awayNote}`]
-  textLines.push('✅ 为当前会话;点下方序号按钮切换:')
+  textLines.push('点序号切换,或新建会话:')
   for (const bucket of order) {
     const items = groups.get(bucket)
     if (items === undefined || items.length === 0) continue
@@ -515,6 +543,7 @@ async function doMenuSessions(ctx: MenuCtx): Promise<MenuResult> {
     }
   })
   if (row.length > 0) rows.push(row)
+  rows.push([newButton])
   return { text: textLines.join('\n'), keyboard: withBack(rows) }
 }
 
@@ -626,11 +655,22 @@ async function doPreset(ctx: MenuCtx): Promise<MenuResult> {
 }
 
 /** Apply a picked workspace root. */
-function doWorkspacePick(data: string, ctx: MenuCtx): MenuResult {
+async function doWorkspacePick(data: string, ctx: MenuCtx): Promise<MenuResult> {
   const target = data.slice('workspace:'.length)
-  // Persist the picked cwd for this chat (merge existing fields + flush), so it
-  // survives a DSH restart and is used as the cwd for the next fresh session.
-  ctx.setCurrentCwd(target)
+  // Switching to a DIFFERENT directory detaches the current session: the user
+  // wants to start fresh there. Picking the same directory keeps the session.
+  const detached = await ctx.switchCwd(target)
+  if (detached) {
+    // Show the session-selection list right away (it carries the 🆕 新建会话
+    // button): the next step after picking a directory is picking or starting
+    // the conversation in it, so the user never has to send a stray message
+    // just to summon this list.
+    const choice = await sessionChoiceMenu(ctx)
+    return {
+      text: `📁 已切换到工作目录:${target}\n已释放原会话,请选择或新建会话:\n\n${choice.text}`,
+      keyboard: choice.keyboard,
+    }
+  }
   return {
     text: `📁 已切换到工作目录:${target}\n新建会话(清除会话)将以该目录开启。`,
     keyboard: mainMenuKeyboard(),

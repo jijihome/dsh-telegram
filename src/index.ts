@@ -701,6 +701,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
       // precedence over the process cwd, so a workspace switch survives the
       // /new and a DSH restart. Read from this bot's own store only.
       currentCwd: () => store.getChat(routeKey(botId, chatId))?.cwd ?? defaultCwd,
+      switchCwd: (cwd) => sessions.switchCwd(chatId, botId, cwd),
       setCurrentCwd: (cwd) => {
         sessions.setCwd(chatId, botId, cwd)
       },
