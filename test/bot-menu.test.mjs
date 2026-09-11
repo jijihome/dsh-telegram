@@ -64,7 +64,8 @@ test('/start result carries the main-menu keyboard', async () => {
   assert.ok(result.reply.includes('dsh-telegram 已就绪'))
   assert.deepEqual(result.keyboard, {
     inline_keyboard: [
-      [{ text: '🆕 新建会话', callback_data: 'menu:new' }, { text: '🗑 清除会话', callback_data: 'menu:clear' }],
+      // 「清除会话」已与「新建会话」合并(同一动作), 不再单独成键。
+      [{ text: '🆕 新建会话', callback_data: 'menu:new' }],
       [{ text: '📂 工作目录', callback_data: 'menu:workspace' }, { text: '💬 会话', callback_data: 'menu:sessions' }],
       [{ text: '🤖 切换模型', callback_data: 'menu:model' }, { text: '🧭 工作方式', callback_data: 'menu:preset' }],
       [{ text: '⚙️ 运维', callback_data: 'menu:ops' }],

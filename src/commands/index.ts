@@ -35,7 +35,7 @@ export interface CommandResult {
   keyboard?: TelegramInlineKeyboard
 }
 
-const COMMANDS = '/start /menu /help /new /clear /stop /workspace /session'.split(' ')
+const COMMANDS = '/start /menu /help /new /stop /workspace /session'.split(' ')
 
 /** Detect a command at the start of a message; returns the bare command name. */
 export function isCommand(text: string): string | undefined {
@@ -59,8 +59,6 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       return commandHelp(ctx)
     case 'new':
       return commandNew(ctx)
-    case 'clear':
-      return commandClear(ctx)
     case 'stop':
       return commandStop(ctx)
     case 'workspace':
@@ -98,7 +96,6 @@ function commandHelp(ctx: CommandContext): CommandResult {
       '/menu — 打开操作菜单',
       '/help — 本帮助',
       '/new — 开启全新会话(丢弃当前上下文)',
-      '/clear — 同 /new',
       '/stop — 取消当前正在运行的回合',
       '/workspace — 查看/切换工作目录',
       '/session — 查看会话绑定状态',
@@ -121,8 +118,6 @@ async function commandNew(ctx: CommandContext): Promise<CommandResult> {
     return { handled: true, reply: `❌ 新建会话失败:${String(error)}` }
   }
 }
-
-const commandClear = commandNew
 
 function commandStop(ctx: CommandContext): CommandResult {
   const cancelled = ctx.sessions.cancel(ctx.chatId, ctx.botId)

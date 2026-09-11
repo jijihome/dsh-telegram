@@ -90,24 +90,20 @@ test('新建会话确认文案含 新会话/工作目录/已丢弃旧会话', as
   }
   const res = await handleMenuCallback('menu:new', ctx)
   assert.ok(res.text.includes('已开启新会话'), res.text)
+  assert.ok(res.text.includes('已丢弃当前上下文'), '文案说明会丢弃上下文(合并「清除会话」后语义更明确)')
   assert.ok(res.text.includes('telegram:bot-a:1:g2'), '显示新会话 id')
   assert.ok(res.text.includes('E:/projects/demo'), '显示工作目录')
   assert.ok(res.text.includes('telegram:bot-a:1:g1'), '显示被丢弃的旧会话')
 })
 
-test('清除会话确认文案同样含 工作目录', async () => {
+test('「清除会话」已合并: 旧回调 menu:clear 不再存在', async () => {
   const ctx = {
     chatId: 1,
     botId: 'bot-a',
-    sessions: {
-      activeSessionId: () => undefined,
-      rotate: async () => ({ sessionId: 'telegram:bot-a:1:g1', cwd: 'E:/ws/other' }),
-    },
+    sessions: { activeSessionId: () => undefined, rotate: async () => ({ sessionId: 's', cwd: 'c' }) },
   }
   const res = await handleMenuCallback('menu:clear', ctx)
-  assert.ok(res.text.includes('E:/ws/other'), res.text)
-  // 没有旧会话时不显示「已丢弃」
-  assert.ok(!res.text.includes('已丢弃'), '无旧会话时不应出现「已丢弃」')
+  assert.ok(res.text.includes('未知菜单项'), 'menu:clear 已移除(与 menu:new 合并)')
 })
 
 test('宿主已占用同名会话时自动换下一个候选(重启后 generation 归零) —— 回归', async () => {

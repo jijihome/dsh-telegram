@@ -83,7 +83,9 @@ export async function mainMenuText(ctx?: MenuCtx): Promise<string> {
 /** Main menu keyboard (rows). */
 export function mainMenuKeyboard(): TelegramInlineKeyboard {
   return keyboard([
-    [['🆕 新建会话', 'menu:new'], ['🗑 清除会话', 'menu:clear']],
+    // 「新建会话」与旧的「清除会话」是同一个动作（都走 sessions.rotate），
+    // 已合并为一个按钮，避免两个入口做同一件事。
+    [['🆕 新建会话', 'menu:new']],
     [['📂 工作目录', 'menu:workspace'], ['💬 会话', 'menu:sessions']],
     [['🤖 切换模型', 'menu:model'], ['🧭 工作方式', 'menu:preset']],
     [['⚙️ 运维', OPS]],
@@ -108,8 +110,6 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
   switch (data) {
     case 'menu:new':
       return doNew(ctx)
-    case 'menu:clear':
-      return doClear(ctx)
     case 'menu:workspace':
       return doWorkspace(ctx)
     case 'menu:model':
@@ -151,22 +151,12 @@ function rotatedText(
   return lines.join('\n')
 }
 
-/** New (rotate to a fresh session). */
+/** New (rotate to a fresh session). 「清除会话」曾与此完全相同, 已合并。 */
 async function doNew(ctx: MenuCtx): Promise<MenuResult> {
   const previousSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
   const binding = await ctx.sessions.rotate(ctx.chatId, ctx.botId)
   return {
-    text: rotatedText('✅ 已开启新会话', binding, previousSessionId),
-    keyboard: mainMenuKeyboard(),
-  }
-}
-
-/** Clear (rotate a fresh session, same as new for now). */
-async function doClear(ctx: MenuCtx): Promise<MenuResult> {
-  const previousSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
-  const binding = await ctx.sessions.rotate(ctx.chatId, ctx.botId)
-  return {
-    text: rotatedText('🧹 已清除会话，开启新会话', binding, previousSessionId),
+    text: rotatedText('✅ 已开启新会话(已丢弃当前上下文)', binding, previousSessionId),
     keyboard: mainMenuKeyboard(),
   }
 }
