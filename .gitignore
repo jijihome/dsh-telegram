@@ -10,6 +10,12 @@ probe/
 # internal task handoff document (local paths, machine details)
 TASK.md
 
+# handoff ledgers (per-session internal notes with machine details)
+handoff-*.md
+
+# other tools' state dirs (Claude/Codex replay, checkpoint, session state)
+.omc/
+
 # runtime data
 data/
 
