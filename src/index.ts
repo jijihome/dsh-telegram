@@ -36,7 +36,10 @@ import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, readHostInstance, writeHostInstance, resolveRestartNotice } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { registerInteractions } from './interactions/interaction-listener.js'
-import { isUserFacingSessionId, workspaceMemberIdsToAdd, dropBlankSessions } from './core/session-visibility.js'
+import { isUserFacingSessionId, isOwnSessionId, workspaceMemberIdsToAdd, dropBlankSessions } from './core/session-visibility.js'
+import { RenamePendingStore } from './core/rename-pending.js'
+import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { indexSessionLogs, readSessionSummary, encodeSessionId } from './core/session-log.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
@@ -459,6 +462,14 @@ export function apply(ctx: Context, config: TelegramConfig) {
    */
   const newSessionDrafts = new Map<string, { provider?: string; model?: string; presetId?: string }>()
 
+  // 会话重命名占位槽：点「✏️ 重命名」登记目标会话，用户的下一条普通文本即新标题。
+  const renamePending = new RenamePendingStore({
+    onExpire: (_, chatId, botId) => {
+      const delivery = deliveries.get(botId)
+      void delivery?.sendFinal(chatId, '⏳ 重命名超时,已取消(可直接再进 🛠 管理会话 重试)。')
+    },
+  })
+
   /**
    * Build the menu context for one (chat, bot) pair. Every capability is bound
    * to that bot's scope and store, so a menu action can only ever touch its own
@@ -697,6 +708,73 @@ export function apply(ctx: Context, config: TelegramConfig) {
         sessions.bind(chatId, botId, sessionId, cwd ?? defaultCwd)
         sessions.setCwd(chatId, botId, cwd ?? defaultCwd)
       },
+      /**
+       * User rename to a new title. Resolves to the accepted (normalized) title.
+       * A non-live session is briefly resumed to obtain its Session object (the
+       * host `sessionTitle.rename` demands a live session), then the handle is
+       * disposed again so a rename never leaves the host holding an extra agent.
+       */
+      renameSession: async (sessionId, title) => {
+        const titleSvc = (ctx.get as (k: string) => unknown)?.('sessionTitle') as
+          | { rename?(session: unknown, title: string): { title?: string } | undefined }
+          | undefined
+        if (titleSvc?.rename === undefined) {
+          throw new Error('宿主未启用 sessionTitle 服务,无法重命名')
+        }
+        const key = routeKey(botId, chatId)
+        const cwd = store.getChat(key)?.cwd ?? defaultCwd
+        let agent = factory.getLive(sessionId)
+        let handleToDispose: AgentHandle | undefined
+        if (agent === undefined) {
+          const model = sessions.modelFor(chatId, botId)
+          const chosenPreset = store.getChat(key)?.agentPreset
+          const handle = await factory.resume({
+            sessionId: sessionId as SessionId,
+            cwd,
+            provider: model.provider,
+            model: model.model,
+            routeKey: key,
+            // 自建会话 resume 该带的 preset 照带,避免临时恢复期间工具世界为空。
+            ...(isOwnSessionId(sessionId) && chosenPreset !== undefined && chosenPreset !== ''
+              ? { agentPreset: chosenPreset }
+              : {}),
+          })
+          agent = handle.agent
+          handleToDispose = handle
+        }
+        try {
+          const snapshot = titleSvc.rename(agent.session, title)
+          return snapshot?.title ?? title
+        } finally {
+          if (handleToDispose !== undefined) {
+            await handleToDispose.dispose().catch(() => { /* 临时句柄清理 */ })
+          }
+        }
+      },
+      /**
+       * Archive a session through the host workspace registry. When the archived
+       * session is the one this chat currently drives, the binding is released
+       * too so the next message opens the session-selection flow instead of
+       * silently feeding a hidden conversation.
+       */
+      archiveSession: async (sessionId) => {
+        const registry = (ctx.get as (k: string) => unknown)?.('workspaceRegistry') as
+          | { archiveSession?(id: unknown): Promise<void> }
+          | undefined
+        if (registry?.archiveSession === undefined) {
+          throw new Error('宿主未启用 workspaceRegistry 服务,无法归档')
+        }
+        await registry.archiveSession(sessionId)
+        if (sessions.activeSessionId(chatId, botId) === sessionId) {
+          await sessions.detach(chatId, botId)
+        }
+      },
+      beginRename: (sessionId) => {
+        renamePending.begin(chatId, botId, sessionId)
+      },
+      cancelRename: () => {
+        renamePending.clear(chatId, botId)
+      },
       // This chat's effective working directory: the persisted choice takes
       // precedence over the process cwd, so a workspace switch survives the
       // /new and a DSH restart. Read from this bot's own store only.
@@ -719,6 +797,28 @@ export function apply(ctx: Context, config: TelegramConfig) {
     logger,
   })
 
+  // 会话重命名消费：处于「下一条消息即新标题」状态时，该文本作为标题喂给宿主
+  // sessionTitle（/cancel 中止），消费后不再落入指令/会话路由。
+  const consumeRename = async (text: string, chatId: number, botId: string): Promise<boolean> => {
+    const pending = renamePending.active(chatId, botId)
+    if (pending === undefined) return false
+    const delivery = deliveries.get(botId)
+    renamePending.clear(chatId, botId)
+    const trimmed = text.trim()
+    if (trimmed === '' || trimmed.toLowerCase() === '/cancel' || trimmed === '取消') {
+      void delivery?.sendFinal(chatId, '已取消重命名。')
+      return true
+    }
+    try {
+      const accepted = await menuCtxFor(chatId, botId).renameSession(pending.sessionId, trimmed)
+      void delivery?.sendFinal(chatId, `✅ 已重命名会话:\n${accepted}`)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      void delivery?.sendFinal(chatId, `❌ 重命名失败: ${msg}`)
+    }
+    return true
+  }
+
   // Bot manager: owns clients, polls, deliveries — one runtime per scope.
   const manager = new BotManager({
     scopes,
@@ -727,7 +827,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
     maxMessageLength: config.maxMessageLength ?? 4096,
     defaultCwd,
     menuCtxFor,
-    respond: { onCallback, onText },
+    respond: {
+      onCallback,
+      onText: (text, chatId, botId) =>
+        consumeRename(text, chatId, botId).then(consumed => consumed || onText(text, chatId, botId)),
+    },
     logger,
   })
 

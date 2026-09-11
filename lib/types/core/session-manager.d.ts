@@ -289,6 +289,22 @@ export declare class SessionManager {
      * (i.e. it had a session that was released), false for a no-op.
      */
     switchCwd(chatId: number, botId: string, cwd: string): Promise<boolean>;
+    /**
+     * Release the chat's current session WITHOUT touching its working directory.
+     *
+     * Used when the user archives the session this chat is driving: an archived
+     * conversation disappears from every list, so the chat must fall back to the
+     * session-selection flow instead of silently feeding messages into a hidden
+     * conversation. Model / preset / cwd stay, exactly like a workspace switch.
+     */
+    detach(chatId: number, botId: string): Promise<boolean>;
+    /**
+     * Shared release: drop config + live bindings, dispose our own agent (a
+     * foreign one stays), clear the persisted session id and mark the chat
+     * explicitly detached. A `cwd` in the options is persisted as the new
+     * directory in the same write; without it the current directory is kept.
+     */
+    private releaseSession;
     /** Dispose every live binding (plugin unload). */
     disposeAll(): Promise<void>;
     /** Create a fresh session (mode `fresh`) or resume the persisted one. */

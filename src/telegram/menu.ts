@@ -44,6 +44,24 @@ export interface MenuCtx {
   listSessions(): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>>
   /** Switch this chat to an existing DSH session (bind + persist). */
   switchSession(sessionId: string, cwd?: string): Promise<void>
+  /**
+   * Rename a session to a user-supplied title. Delegates to the host
+   * `sessionTitle` user-rename (pins the title and stops auto-generation).
+   * Resolves to the accepted (normalized) title.
+   */
+  renameSession(sessionId: string, title: string): Promise<string>
+  /**
+   * Archive a session through the workspace registry's global archive set.
+   * Irreversible in the host: the session leaves every grouping surface while
+   * its log and workspace accounting are retained. When the archived session
+   * is the one this chat currently drives, the implementation also releases
+   * the binding so the next message opens the session-selection flow.
+   */
+  archiveSession(sessionId: string): Promise<void>
+  /** Enter rename mode: this chat's next ordinary text becomes the new title. */
+  beginRename(sessionId: string): void
+  /** Leave rename mode (cancel). */
+  cancelRename(): void
   /** This chat's currently selected working directory (persisted cwd or default). */
   currentCwd(): string
   /**
@@ -134,6 +152,10 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
       return doPreset(ctx)
     case 'menu:sessions':
       return doMenuSessions(ctx)
+    case 'menu:sessions-manage':
+      return doSessionsManage(ctx)
+    case 'smrc':
+      return doRenameCancel(ctx)
     case OPS:
       return doOps(ctx)
     case OPS_RESTART:
@@ -145,9 +167,14 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
     default:
       // Namespaced sub-actions: workspace:<path>, model:<provider>:<model>, preset:<id>
       // Namespaced sub-actions: workspace:<path>, model:<provider>:<model>, preset:<id>, session:<id>
+      // 会话管理族的前缀更长，必须先判：sma!(执行归档) > sma:(归档确认) > smr:(重命名) > sm:(详情卡) > session:(选择)。
       if (data.startsWith('workspace:')) return doWorkspacePick(data, ctx)
       if (data.startsWith('model:')) return doModelPick(data, ctx)
       if (data.startsWith('preset:')) return doPresetPick(data, ctx)
+      if (data.startsWith('sma!:')) return doSessionArchive(data.slice('sma!:'.length), ctx)
+      if (data.startsWith('sma:')) return doSessionArchiveConfirm(data.slice('sma:'.length), ctx)
+      if (data.startsWith('smr:')) return doSessionRename(data.slice('smr:'.length), ctx)
+      if (data.startsWith('sm:')) return doSessionManage(data.slice('sm:'.length), ctx)
       if (data.startsWith('session:')) return doSessionPick(data, ctx)
       if (data.startsWith('nw:')) return handleNewWizard(data, ctx)
       return { text: '未知菜单项', keyboard: mainMenuKeyboard() }
@@ -543,8 +570,155 @@ export async function sessionChoiceMenu(ctx: MenuCtx): Promise<MenuResult> {
     }
   })
   if (row.length > 0) rows.push(row)
-  rows.push([newButton])
+  rows.push([newButton], [['🛠 管理会话', 'menu:sessions-manage']])
   return { text: textLines.join('\n'), keyboard: withBack(rows) }
+}
+
+/* ------------------------------------------------------------------ 会话管理
+ * 「🛠 管理会话」入口：管理列表（同目录、只读展示）→ 详情卡 → 重命名 / 归档。
+ * 重命名走两步：菜单登记目标会话，用户的下一条普通文本即新标题（Telegram 无法
+ * 弹输入框），/cancel 或菜单取消按钮中止，超时自动失效。
+ * 归档调宿主的注册表全局归档集（不可逆，会话日志与工作区记账保留）。
+ */
+
+/** 管理列表：与选择列表同一批会话，按钮进入详情卡而非直接切换。 */
+async function doSessionsManage(ctx: MenuCtx): Promise<MenuResult> {
+  let list: Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>
+  try {
+    list = await ctx.listSessions()
+  } catch {
+    list = []
+  }
+  const currentCwd = ctx.currentCwd()
+  const activeSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
+  const { scoped } = scopeSessionsToDir(list, currentCwd, activeSessionId)
+  if (scoped.length === 0) {
+    return {
+      text: `🛠 当前目录 \`${currentCwd}\` 下暂无可管理的会话`,
+      keyboard: keyboard([[['🔙 返回会话列表', 'menu:sessions']], [['🔙 返回上级', BACK]]]),
+    }
+  }
+  const CAP = 30
+  const shown = scoped.slice(0, CAP)
+  const lines = [`🛠 **管理会话**（当前目录 \`${currentCwd}\` · 命中 ${scoped.length} 条）`, '点序号进入会话管理:']
+  shown.forEach((s, i) => {
+    const raw = s.displayTitle ?? s.title ?? s.id.slice(0, 12)
+    const title = raw.length > 36 ? `${raw.slice(0, 36)}…` : raw
+    const mark = s.id === activeSessionId ? '\u2705 ' : ''
+    lines.push(`　${i + 1}. ${mark}${formatTime(s.updatedAt ?? 0)} · \`${title}\``)
+  })
+  if (scoped.length > CAP) lines.push('', `…（共 ${scoped.length} 条，仅显示前 ${CAP}）`)
+  const rows: Array<Array<[string, string]>> = []
+  let row: Array<[string, string]> = []
+  shown.forEach((s, i) => {
+    row.push([`${s.id === activeSessionId ? '\u2705 ' : ''}${i + 1}`, `sm:${s.id}`])
+    if (row.length === 5) {
+      rows.push(row)
+      row = []
+    }
+  })
+  if (row.length > 0) rows.push(row)
+  rows.push([['🔙 返回会话列表', 'menu:sessions']])
+  return { text: lines.join('\n'), keyboard: withBack(rows) }
+}
+
+/** 会话详情卡：标题/时间/目录/是否当前会话 + 重命名、归档入口。 */
+async function doSessionManage(sessionId: string, ctx: MenuCtx): Promise<MenuResult> {
+  const found = await findSession(sessionId, ctx)
+  const activeSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
+  const isActive = activeSessionId === sessionId
+  const title = found?.displayTitle ?? found?.title ?? sessionId
+  const time = formatTime(found?.updatedAt ?? 0)
+  const lines = [
+    '🛠 **会话管理**',
+    `• 标题: \`${title}\``,
+    `• 目录: ${found?.cwd ?? ctx.currentCwd()}`,
+    `• 时间: ${time}`,
+    `• 会话: \`${sessionId}\``,
+    isActive ? '• ✅ 这是本 chat 当前会话(归档会同时释放绑定)' : '• 非当前会话',
+  ]
+  const rows: Array<Array<[string, string]>> = [
+    [['✏️ 重命名', `smr:${sessionId}`], ['🗄 归档', `sma:${sessionId}`]],
+    [['🔙 返回管理列表', 'menu:sessions-manage']],
+  ]
+  return { text: lines.join('\n'), keyboard: keyboard(rows) }
+}
+
+/** 重命名第 1 步：登记目标会话，等下一条文本消息作为新标题。 */
+async function doSessionRename(sessionId: string, ctx: MenuCtx): Promise<MenuResult> {
+  const found = await findSession(sessionId, ctx)
+  const title = found?.displayTitle ?? found?.title ?? sessionId
+  ctx.beginRename(sessionId)
+  return {
+    text: [
+      '✏️ **重命名会话**',
+      `目标: \`${title}\``,
+      '',
+      '请直接发送新的会话标题(下一条消息即标题,不会发给 agent)。',
+      '发送 /cancel 或点下方按钮可取消;120 秒内未发送则自动失效。',
+    ].join('\n'),
+    keyboard: keyboard([[['❌ 取消重命名', 'smrc']]]),
+  }
+}
+
+/** 重命名取消：清掉登记态。 */
+function doRenameCancel(ctx: MenuCtx): MenuResult {
+  ctx.cancelRename()
+  return { text: '已取消重命名。', keyboard: mainMenuKeyboard() }
+}
+
+/** 归档第 1 步：二次确认（宿主归档不可逆）。 */
+async function doSessionArchiveConfirm(sessionId: string, ctx: MenuCtx): Promise<MenuResult> {
+  const found = await findSession(sessionId, ctx)
+  const title = found?.displayTitle ?? found?.title ?? sessionId
+  const isActive = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId) === sessionId
+  const lines = [
+    '🗄 **确认归档会话**',
+    `标题: \`${title}\``,
+    '',
+    '归档后该会话将从所有列表隐藏(含 GUI),会话日志仍保留;',
+    '宿主不提供取消归档,请确认后再执行。',
+  ]
+  if (isActive) lines.push('', '⚠️ 这是本 chat 当前会话,归档会同时释放绑定,下一条消息将弹出会话选择列表。')
+  return {
+    text: lines.join('\n'),
+    keyboard: keyboard([
+      [['🗄 确认归档', `sma!:${sessionId}`]],
+      [['🔙 返回', `sm:${sessionId}`]],
+    ]),
+  }
+}
+
+/** 归档第 2 步：执行（宿主注册表归档集）。 */
+async function doSessionArchive(sessionId: string, ctx: MenuCtx): Promise<MenuResult> {
+  const found = await findSession(sessionId, ctx)
+  const title = found?.displayTitle ?? found?.title ?? sessionId
+  const wasActive = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId) === sessionId
+  try {
+    await ctx.archiveSession(sessionId)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    return { text: `❌ 归档失败: ${msg}`, keyboard: keyboard([[['🔙 返回', `sm:${sessionId}`]]]) }
+  }
+  const lines = [`✅ 已归档: \`${title}\``, '该会话已从所有列表隐藏(会话日志保留)。']
+  if (wasActive) lines.push('当前会话已释放,下一条消息将弹出会话选择列表。')
+  return {
+    text: lines.join('\n'),
+    keyboard: keyboard([[['🔙 返回会话列表', 'menu:sessions']], [['🔙 返回上级', BACK]]]),
+  }
+}
+
+/** 从同一份名单里查一条会话（标题/时间/目录），查不到返回 undefined。 */
+async function findSession(
+  sessionId: string,
+  ctx: MenuCtx,
+): Promise<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number } | undefined> {
+  try {
+    const list = await ctx.listSessions()
+    return list.find(s => s.id === sessionId)
+  } catch {
+    return undefined
+  }
 }
 
 /**

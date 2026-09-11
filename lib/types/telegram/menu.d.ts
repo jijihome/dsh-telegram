@@ -61,6 +61,24 @@ export interface MenuCtx {
     }>>;
     /** Switch this chat to an existing DSH session (bind + persist). */
     switchSession(sessionId: string, cwd?: string): Promise<void>;
+    /**
+     * Rename a session to a user-supplied title. Delegates to the host
+     * `sessionTitle` user-rename (pins the title and stops auto-generation).
+     * Resolves to the accepted (normalized) title.
+     */
+    renameSession(sessionId: string, title: string): Promise<string>;
+    /**
+     * Archive a session through the workspace registry's global archive set.
+     * Irreversible in the host: the session leaves every grouping surface while
+     * its log and workspace accounting are retained. When the archived session
+     * is the one this chat currently drives, the implementation also releases
+     * the binding so the next message opens the session-selection flow.
+     */
+    archiveSession(sessionId: string): Promise<void>;
+    /** Enter rename mode: this chat's next ordinary text becomes the new title. */
+    beginRename(sessionId: string): void;
+    /** Leave rename mode (cancel). */
+    cancelRename(): void;
     /** This chat's currently selected working directory (persisted cwd or default). */
     currentCwd(): string;
     /**

@@ -649,11 +649,43 @@ export class SessionManager {
    * (i.e. it had a session that was released), false for a no-op.
    */
   async switchCwd(chatId: number, botId: string, cwd: string): Promise<boolean> {
-    const key = routeKey(botId, chatId)
     if (sameDir(cwd, this.chatCwd(chatId, botId))) {
       // Same directory (case/separator-insensitive): keep the current session.
       return false
     }
+    const hadSession = await this.releaseSession(chatId, botId, { reason: 'switchCwd', cwd })
+    this.logger?.warn(`[tg] switchCwd ${routeKey(botId, chatId)}: 已切换工作目录到 ${cwd},释放会话${hadSession ? '' : '(本无会话)'}`)
+    return hadSession
+  }
+
+  /**
+   * Release the chat's current session WITHOUT touching its working directory.
+   *
+   * Used when the user archives the session this chat is driving: an archived
+   * conversation disappears from every list, so the chat must fall back to the
+   * session-selection flow instead of silently feeding messages into a hidden
+   * conversation. Model / preset / cwd stay, exactly like a workspace switch.
+   */
+  async detach(chatId: number, botId: string): Promise<boolean> {
+    const hadSession = await this.releaseSession(chatId, botId, { reason: 'detach' })
+    if (hadSession) {
+      this.logger?.warn(`[tg] detach ${routeKey(botId, chatId)}: 已释放会话(归档当前会话)`)
+    }
+    return hadSession
+  }
+
+  /**
+   * Shared release: drop config + live bindings, dispose our own agent (a
+   * foreign one stays), clear the persisted session id and mark the chat
+   * explicitly detached. A `cwd` in the options is persisted as the new
+   * directory in the same write; without it the current directory is kept.
+   */
+  private async releaseSession(
+    chatId: number,
+    botId: string,
+    options: { reason: string; cwd?: string },
+  ): Promise<boolean> {
+    const key = routeKey(botId, chatId)
     const hadSession = this.activeSessionId(chatId, botId) !== undefined
     // Release the live binding for this route first (unbinds config + live).
     const previous = this.bindings.get(key)
@@ -670,13 +702,16 @@ export class SessionManager {
       // workspace switch — the config/menu binding is dropped, the agent stays.
       if (previous.botId === botId) {
         await previous.handle.dispose().catch(error => {
-          this.logger?.warn(`[tg] switchCwd dispose旧 agent 失败: ${messageOf(error)}`)
+          this.logger?.warn(`[tg] ${options.reason} dispose旧 agent 失败: ${messageOf(error)}`)
         })
       }
     }
-    // Clear the persisted selection but keep cwd / model / preset / botId.
+    // Clear the persisted selection but keep cwd / model / preset / botId
+    // (a cwd override from the caller lands in the same write).
     const store = this.storeFor(botId)
     const current = store.getChat(key)
+    // cwd is required on ChatState; without an override keep the current one.
+    const cwd = options.cwd ?? current?.cwd ?? this.chatCwd(chatId, botId)
     store.setChat(key, {
       ...(current ?? {}),
       sessionId: '',
@@ -685,7 +720,6 @@ export class SessionManager {
       sessionDetached: true,
     } satisfies ChatState)
     store.flush()
-    this.logger?.warn(`[tg] switchCwd ${key}: 已切换工作目录到 ${cwd},释放会话${hadSession ? '' : '(本无会话)'}`)
     return hadSession
   }
 
