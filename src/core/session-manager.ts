@@ -24,6 +24,7 @@ import type { AgentFactoryLike } from '../harness/agent-factory.js'
 import { sessionIdOf } from '../harness/agent-factory.js'
 import type { BotScope } from './bot-scope.js'
 import { routeKey } from './bot-scope.js'
+import { isOwnSessionId } from './session-visibility.js'
 import type { ChatState, StateStore } from './state-store.js'
 
 export interface SessionBinding {
@@ -628,7 +629,7 @@ export class SessionManager {
           // Our own sessions must re-join their preset on resume, or a resumed chat
           // loses its tool world. Foreign GUI sessions keep the composition their
           // creator mounted.
-          ...(persisted.sessionId.startsWith('telegram:') && presetId !== undefined && presetId !== ''
+          ...(isOwnSessionId(persisted.sessionId) && presetId !== undefined && presetId !== ''
             ? { agentPreset: presetId }
             : {}),
         })

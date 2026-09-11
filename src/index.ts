@@ -36,6 +36,7 @@ import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, readHostInstance, writeHostInstance, resolveRestartNotice } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { registerInteractions } from './interactions/interaction-listener.js'
+import { isUserFacingSessionId } from './core/session-visibility.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -334,11 +335,20 @@ export function apply(ctx: Context, config: TelegramConfig) {
     interface RosterEntry { id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }
     const byId = new Map<string, RosterEntry>()
     // Skip sub-agent sessions: they are child turns, not user-facing
-    // conversations, so they should not appear in the sessions picker.
+    // conversations, so they should not appear in the sessions picker. The raw
+    // projection cache exposes no `origin`, hence the id-shape filter below.
     const isSubagent = (s: { origin?: unknown }) => s?.origin === 'subagent'
+    // Archived sessions are hidden by the GUI too; mirror that here.
+    const archived = (() => {
+      try {
+        const reg = (ctx.get as (k: string) => unknown)?.('workspaceRegistry') as
+          { archivedSessionIds?: readonly string[] } | undefined
+        return new Set<string>(reg?.archivedSessionIds ?? [])
+      } catch { return new Set<string>() }
+    })()
     /** Merge one entry, letting a later source only FILL gaps (never erase cwd). */
     const merge = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
-      if (s === undefined || !s.id || isSubagent(s)) return
+      if (s === undefined || !s.id || isSubagent(s) || archived.has(s.id)) return
       const existing = byId.get(s.id)
       byId.set(s.id, {
         id: s.id,
@@ -366,6 +376,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
         try { parsed = JSON.parse(readFileSync(join(sdir, name), 'utf8')) } catch { continue }
         const rec = parsed?.record
         const id = name.slice(0, -5)
+        // The cache also holds transient CHILD runs (memory-keeper / companion
+        // subagents) keyed by a BARE uuid, with no `origin` to test. The GUI hides
+        // them; a roster built from these files must too, or the picker lists every
+        // child turn as if the user had created it.
+        if (!isUserFacingSessionId(id)) continue
         const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
         const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
         merge({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt, origin: rec?.identity?.origin })
