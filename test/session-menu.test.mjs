@@ -68,3 +68,25 @@ test('会话菜单: 当前目录无会话时的引导文案', async () => {
   const res = await handleMenuCallback('menu:sessions', fakeCtx({ list: [], active: undefined }))
   assert.ok(res.text.includes('当前目录下暂无会话'))
 })
+
+test('切换会话确认文案显示标题 + 时间, 不再显示裸 id', async () => {
+  const now = Date.now()
+  const id = 'session-e136e1ff-d52d-4d09-90ac-3b256d539bba'
+  let switched
+  const ctx = {
+    ...fakeCtx({ list: [{ id, cwd: 'D:\\repos', displayTitle: 'Telegram · Github趋势', updatedAt: now - 2 * HOUR }], active: undefined }),
+    switchSession: async (sessionId, cwd) => { switched = { sessionId, cwd } },
+  }
+  const res = await handleMenuCallback(`session:${id}`, ctx)
+  assert.ok(res.text.includes('Telegram · Github趋势'), `应显示标题, 实际:\n${res.text}`)
+  assert.ok(res.text.includes('· '), '应带时间')
+  assert.ok(!res.text.includes(id), '不应再显示裸 id')
+  assert.deepEqual(switched, { sessionId: id, cwd: 'D:\\repos' }, '切换参数不变')
+})
+
+test('切换会话确认文案: 名单查不到时回退显示 id', async () => {
+  const id = 'session-unknown-id'
+  const ctx = { ...fakeCtx({ list: [], active: undefined }), switchSession: async () => {} }
+  const res = await handleMenuCallback(`session:${id}`, ctx)
+  assert.ok(res.text.includes(id), '查不到时回退 id')
+})

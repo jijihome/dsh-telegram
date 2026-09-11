@@ -523,16 +523,25 @@ async function doPresetPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
 /** A picked session: switch this chat to it (bind + persist). */
 async function doSessionPick(data: string, ctx: MenuCtx): Promise<MenuResult> {
   const id = data.slice('session:'.length)
-  // Look up the session's cwd (for the binding) from the roster, else default.
+  // Look up the session's cwd (for the binding) AND its display title/time from
+  // the same roster the picker renders, so the confirmation names the
+  // conversation instead of echoing a raw session id.
   let cwd: string | undefined
+  let label = id
   try {
     const list = await ctx.listSessions()
-    cwd = list.find(s => s.id === id)?.cwd
+    const hit = list.find(s => s.id === id)
+    cwd = hit?.cwd
+    const title = hit?.displayTitle ?? hit?.title
+    if (title !== undefined && title !== '' && title !== id) {
+      const time = formatTime(hit?.updatedAt ?? 0)
+      label = time === '--' ? title : `${title} · ${time}`
+    }
   } catch { cwd = undefined }
   try {
     await ctx.switchSession(id, cwd)
     return {
-      text: `✅ 已切换到会话: ${id}\n后续消息将进入该会话;工作目录: ${cwd ?? ctx.currentCwd()}`,
+      text: `✅ 已切换到会话: ${label}\n后续消息将进入该会话;工作目录: ${cwd ?? ctx.currentCwd()}`,
       keyboard: mainMenuKeyboard(),
     }
   } catch (error) {
