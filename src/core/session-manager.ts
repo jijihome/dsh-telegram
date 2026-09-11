@@ -84,6 +84,12 @@ export interface SessionManagerOptions {
    * 仅在 fresh 建会话后触发；失败不得影响会话本身。
    */
   attachWorkspace?: (sessionId: string, cwd: string) => Promise<void>
+  /**
+   * 宿主默认 agent preset id（settings 的 `agentPresets.default`）。会话没有 preset
+   * 时其工具世界为空（无 shell/文件工具），故 fresh 建会话必须带 preset：
+   * 本 chat 已选（工作方式菜单）优先，其次这个宿主默认。
+   */
+  defaultPresetId?: () => string | undefined
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -146,6 +152,7 @@ export class SessionManager {
   private readonly defaultSelection: SessionManagerOptions['defaultSelection']
   private readonly sessionModelLookup: SessionManagerOptions['sessionModelLookup']
   private readonly attachWorkspace: SessionManagerOptions['attachWorkspace']
+  private readonly defaultPresetId: SessionManagerOptions['defaultPresetId']
   private readonly logger: SessionManagerOptions['logger'] | undefined
   private readonly bindings = new Map<string, SessionBinding>()
   /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */
@@ -166,6 +173,7 @@ export class SessionManager {
     this.defaultSelection = options.defaultSelection
     this.sessionModelLookup = options.sessionModelLookup
     this.attachWorkspace = options.attachWorkspace
+    this.defaultPresetId = options.defaultPresetId
     this.logger = options.logger
   }
 
@@ -586,6 +594,14 @@ export class SessionManager {
     this.scopeOf(botId)
     const persisted = store.getChat(key)
     const model = this.modelFor(chatId, botId)
+    // The agent preset composes the agent's scoped world (tools, prompt sections).
+    // A fresh session created WITHOUT one has no tools at all — no shell, no file
+    // access — so always resolve one: the chat's 工作方式 pick first, else the
+    // host default (`agentPresets.default`).
+    const chosenPreset = persisted?.agentPreset
+    const presetId = chosenPreset !== undefined && chosenPreset !== ''
+      ? chosenPreset
+      : this.defaultPresetId?.()
     let handle: AgentHandle
     let sessionId: string
     // A persisted session whose agent is ALREADY live in this process (e.g. a GUI
@@ -618,12 +634,12 @@ export class SessionManager {
       } catch (error) {
         // Persisted session no longer available: fall through to a fresh create.
         this.logger?.warn(`[tg] resume failed for ${key}: ${messageOf(error)}; creating fresh`)
-        const fresh = await this.createFresh(key, chatId, botId, cwd, generation, model)
+        const fresh = await this.createFresh(key, chatId, botId, cwd, generation, model, presetId)
         handle = fresh.handle
         sessionId = fresh.sessionId
       }
     } else {
-      const fresh = await this.createFresh(key, chatId, botId, cwd, generation, model)
+      const fresh = await this.createFresh(key, chatId, botId, cwd, generation, model, presetId)
       handle = fresh.handle
       sessionId = fresh.sessionId
     }
@@ -668,6 +684,7 @@ export class SessionManager {
     cwd: string,
     generation: number,
     model: { provider: string; model: string },
+    agentPreset?: string,
   ): Promise<{ handle: AgentHandle; sessionId: string }> {
     let n = generation
     for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -677,8 +694,14 @@ export class SessionManager {
         continue
       }
       try {
+        this.logger?.warn(`[tg] fresh session ${candidate} cwd=${cwd} preset=${agentPreset ?? '(宿主默认)'}`)
         const handle = await this.factory.create({
-          sessionId: SessionId(candidate), cwd, provider: model.provider, model: model.model, routeKey: key,
+          sessionId: SessionId(candidate),
+          cwd,
+          provider: model.provider,
+          model: model.model,
+          routeKey: key,
+          ...(agentPreset !== undefined && agentPreset !== '' ? { agentPreset } : {}),
         })
         return { handle, sessionId: sessionIdOf(handle) || candidate }
       } catch (error) {

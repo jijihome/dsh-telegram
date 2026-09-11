@@ -162,3 +162,31 @@ test('fresh 建会话后触发工作区挂载(attachWorkspace), 失败不影响�
   assert.equal(attached[0].sessionId, b.sessionId)
   assert.equal(attached[0].cwd, 'E:/ws')
 })
+
+test('fresh 建会话携带 agent preset: chat 已选优先, 否则宿主默认', async () => {
+  // 未选工作方式 → 用宿主默认 preset(否则会话没有工具世界)
+  const envA = makeEnv()
+  const factoryA = makeFactory()
+  const sessionsA = makeManager(envA, factoryA, 'E:/ws', { defaultPresetId: () => 'standard' })
+  await sessionsA.rotate(9, 'bot-a')
+  const createA = [...factoryA.requests].reverse().find(r => r.kind === 'create')
+  assert.equal(createA.agentPreset, 'standard', '无 chat 选择时应带宿主默认 preset')
+
+  // chat 已选工作方式 → 优先 chat 的选择
+  const envB = makeEnv()
+  const factoryB = makeFactory()
+  const sessionsB = makeManager(envB, factoryB, 'E:/ws', { defaultPresetId: () => 'standard' })
+  sessionsB.setPreset(9, 'bot-a', 'dev')
+  await sessionsB.rotate(9, 'bot-a')
+  const createB = [...factoryB.requests].reverse().find(r => r.kind === 'create')
+  assert.equal(createB.agentPreset, 'dev', 'chat 已选 preset 应优先于宿主默认')
+})
+
+test('宿主无默认 preset 时不传该字段(交给宿主默认行为)', async () => {
+  const env = makeEnv()
+  const factory = makeFactory()
+  const sessions = makeManager(env, factory, 'E:/ws')   // 不给 defaultPresetId
+  await sessions.rotate(11, 'bot-a')
+  const create = [...factory.requests].reverse().find(r => r.kind === 'create')
+  assert.equal('agentPreset' in create, false, '无 preset 时不应凭空塞字段')
+})

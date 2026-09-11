@@ -82,6 +82,12 @@ export interface SessionManagerOptions {
      * 仅在 fresh 建会话后触发；失败不得影响会话本身。
      */
     attachWorkspace?: (sessionId: string, cwd: string) => Promise<void>;
+    /**
+     * 宿主默认 agent preset id（settings 的 `agentPresets.default`）。会话没有 preset
+     * 时其工具世界为空（无 shell/文件工具），故 fresh 建会话必须带 preset：
+     * 本 chat 已选（工作方式菜单）优先，其次这个宿主默认。
+     */
+    defaultPresetId?: () => string | undefined;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -125,6 +131,7 @@ export declare class SessionManager {
     private readonly defaultSelection;
     private readonly sessionModelLookup;
     private readonly attachWorkspace;
+    private readonly defaultPresetId;
     private readonly logger;
     private readonly bindings;
     /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */

@@ -189,7 +189,11 @@ export function apply(ctx: Context, config: TelegramConfig) {
   }
   const attachToWorkspace = async (sessionId: string, cwd: string): Promise<void> => {
     try {
-      const registry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryLike }).workspaceRegistry
+      // Service LOCATOR (ctx.get), not property access: `ctx.workspaceRegistry`
+      // throws "cannot get property without inject", and injecting it would make
+      // the whole plugin depend on the workspace package being installed.
+      const registry = (ctx.get as (k: string) => unknown)?.('workspaceRegistry') as
+        WorkspaceRegistryLike | undefined
       if (registry === undefined) {
         line('WARN', `[tg] 宿主未启用 workspaceRegistry,会话 ${sessionId} 将显示在未分组`)
         return
@@ -211,6 +215,14 @@ export function apply(ctx: Context, config: TelegramConfig) {
     defaultSelection: readDefaultSelection,
     sessionModelLookup: readSessionModelFromCache,
     attachWorkspace: attachToWorkspace,
+    // Host default agent preset (settings `agentPresets.default`). Sessions built
+    // without a preset have an empty tool world, so fresh creates always carry one.
+    defaultPresetId: () => {
+      try {
+        const ap = (ctx.get as (k: string) => unknown)?.('agentPresets') as { defaultId?: string } | undefined
+        return ap?.defaultId
+      } catch { return undefined }
+    },
     logger,
   })
 

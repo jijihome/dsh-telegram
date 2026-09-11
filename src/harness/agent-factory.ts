@@ -34,6 +34,12 @@ export interface AgentCreateRequest {
   model: string
   /** Isolation key of the owning route (`<botId>:<chatId>`). */
   routeKey: string
+  /**
+   * Agent preset id applied at creation (`meta.agentPreset`). The preset composes
+   * the agent's scoped world — tools, prompt sections — so a session created
+   * without one has NO tools (no shell/file access). Omit to let the host default.
+   */
+  agentPreset?: string
 }
 
 export interface AgentResumeRequest {
@@ -92,7 +98,12 @@ export class DshAgentFactory implements AgentFactoryLike {
     const ref = this.refFor(request.routeKey, request)
     return this.ctx.agents.create({
       sessionId: request.sessionId,
-      meta: { cwd: request.cwd },
+      meta: {
+        cwd: request.cwd,
+        ...(request.agentPreset !== undefined && request.agentPreset !== ''
+          ? { agentPreset: request.agentPreset }
+          : {}),
+      },
       agentOptions: {
         provider: ref.current!.provider,
         model: ref.current!.model,
