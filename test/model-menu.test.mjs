@@ -26,16 +26,19 @@ function fakeMenuCtx(overrides = {}) {
 test('模型菜单: 分组文字列表 + 唯一序号,现行模型文字带 ✅', async () => {
   const res = await handleMenuCallback('menu:model', fakeMenuCtx())
   const t = res.text
-  // 按 provider 分组
-  assert.ok(t.includes('p1:'), '含 p1 分组')
-  assert.ok(t.includes('p2:'), '含 p2 分组')
-  // 全局唯一序号 + 现行模型文字带 ✅
-  assert.ok(t.includes('1. ✅ m1'), '现行模型文字带 ✅ 且序号为1')
-  assert.ok(t.includes('2. m2'), 'p1 第二个模型序号2')
-  assert.ok(t.includes('3. n1'), 'p2 模型序号3(全局唯一)')
+  // 按 provider 分组, 且组名加粗(markdown **粗体**)
+  assert.ok(t.includes('**p1**'), '含加粗的 p1 分组标题')
+  assert.ok(t.includes('**p2**'), '含加粗的 p2 分组标题')
+  // 全局唯一序号 + 现行模型文字带 ✅ + 模型名等宽
+  assert.ok(t.includes('1. ✅ `m1`'), '现行模型文字带 ✅ 且序号为1')
+  assert.ok(t.includes('2. `m2`'), 'p1 第二个模型序号2')
+  assert.ok(t.includes('3. `n1`'), 'p2 模型序号3(全局唯一)')
   // 序号必须唯一且连续
   const idxs = [...t.matchAll(/^\s*(\d+)\./gm)].map(m => Number(m[1]))
   assert.deepEqual(idxs, [1, 2, 3], '序号全局唯一且连续')
+  // 标题加粗 + 当前模型等宽
+  assert.ok(t.includes('**选择模型**'), '标题加粗')
+  assert.ok(t.includes('`m1`'), '当前模型等宽显示')
 })
 
 test('模型菜单: 下方按钮为序号,现行模型按钮带 ✅,callback 为 model:provider:model', async () => {
