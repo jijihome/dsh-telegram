@@ -36,7 +36,7 @@ import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, readHostInstance, writeHostInstance, resolveRestartNotice } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { registerInteractions } from './interactions/interaction-listener.js'
-import { isUserFacingSessionId } from './core/session-visibility.js'
+import { isUserFacingSessionId, workspaceMemberIdsToAdd } from './core/session-visibility.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -573,6 +573,28 @@ export function apply(ctx: Context, config: TelegramConfig) {
       listSessions: async () => {
         const owned = sessions.sessionIdsFor(botId)
         const roster = await hostSessionRoster()
+        // The GUI groups by the WORKSPACE's sessionIds membership, and
+        // plugin-created sessions (`telegram:…`) have no projection-cache entry at
+        // all — so a cwd-matched roster alone silently omits them. Add the current
+        // directory's workspace members, and drop the archived ones (the GUI hides
+        // those too).
+        try {
+          const chatCwd = store.getChat(routeKey(botId, chatId))?.cwd ?? defaultCwd
+          const reg = (ctx.get as (k: string) => unknown)?.('workspaceRegistry') as
+            | {
+                resolveByPath(path: string): Promise<{ path: string; sessionIds: readonly string[] } | undefined>
+                archivedSessionIds?: readonly string[]
+              }
+            | undefined
+          if (reg !== undefined) {
+            const archived = new Set<string>(reg.archivedSessionIds ?? [])
+            const ws = await reg.resolveByPath(chatCwd).catch(() => undefined)
+            const add = workspaceMemberIdsToAdd(new Set(roster.map(s => s.id)), ws?.sessionIds ?? [], archived)
+            for (const id of add) {
+              roster.push({ id, cwd: ws?.path ?? chatCwd, displayTitle: id, updatedAt: 0 })
+            }
+          }
+        } catch { /* workspace membership is a best-effort enrich */ }
         if (scope.allowHostSessions) return roster
         // Strict default: only sessions this bot owns (its own agents, its
         // config bindings, and chats it persisted). Foreign sessions are hidden.

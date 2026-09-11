@@ -43,3 +43,31 @@ export function isUserFacingSessionId(id: string): boolean {
 export function isOwnSessionId(id: string): boolean {
   return id.startsWith('telegram:')
 }
+
+/**
+ * Workspace-member sessions missing from a roster.
+ *
+ * The GUI groups sessions by a Workspace's `sessionIds` membership — not by the
+ * session's own cwd — and sessions created by a plugin have no projection-cache
+ * entry at all, so a cwd-matched roster silently omits them. Callers add these
+ * ids to close that gap; archived ids are never added (the GUI hides them).
+ *
+ * @param existing - ids already present in the roster.
+ * @param members - the workspace's `sessionIds`.
+ * @param archived - the registry-global archive set.
+ * @returns member ids worth adding, in membership order.
+ */
+export function workspaceMemberIdsToAdd(
+  existing: ReadonlySet<string>,
+  members: readonly string[],
+  archived: ReadonlySet<string>,
+): string[] {
+  const out: string[] = []
+  const seen = new Set(existing)
+  for (const id of members) {
+    if (id === '' || seen.has(id) || archived.has(id)) continue
+    out.push(id)
+    seen.add(id)
+  }
+  return out
+}

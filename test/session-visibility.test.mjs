@@ -10,7 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isUserFacingSessionId, isOwnSessionId } from '../lib/core/session-visibility.js'
+import { isUserFacingSessionId, isOwnSessionId, workspaceMemberIdsToAdd } from '../lib/core/session-visibility.js'
 
 test('顶层会话( session-<uuid> ) 可见', () => {
   assert.equal(isUserFacingSessionId('session-222ff68d-5093-4612-abec-a3685d0f2359'), true)
@@ -50,4 +50,32 @@ test('D:\\repos 真实数据集: 22 条缓存条目过滤后剩 3 条顶层会�
   const kept = [...bare, ...top].filter(isUserFacingSessionId)
   assert.equal(kept.length, 3, '子代理全部被过滤, 只剩 3 条真实话题')
   assert.deepEqual(kept, top)
+})
+
+test('工作区成员补齐: D:\\repos 实测应得 4 条(与 GUI 一致)', () => {
+  // 2026-09-11 实数: D:\repos 成员 5 条; session-af9753f7 已归档(GUI 也不显示)
+  const members = [
+    'telegram:bot-a:6434599758:g7',
+    'telegram:bot-a:6434599758:g6',
+    'session-222ff68d-5093-4612-abec-a3685d0f2359',
+    'session-af9753f7-6b82-4a5e-9dd1-92021e2d4cac',
+    'session-e136e1ff-d52d-4d09-90ac-3b256d539bba',
+  ]
+  const archived = new Set(['session-af9753f7-6b82-4a5e-9dd1-92021e2d4cac'])
+  // 投影缓存只贡献 2 条(af9753f7 被归档过滤掉; telegram 会话在缓存里没有条目)
+  const roster = new Set([
+    'session-222ff68d-5093-4612-abec-a3685d0f2359',
+    'session-e136e1ff-d52d-4d09-90ac-3b256d539bba',
+  ])
+
+  const add = workspaceMemberIdsToAdd(roster, members, archived)
+
+  assert.deepEqual(add, ['telegram:bot-a:6434599758:g7', 'telegram:bot-a:6434599758:g6'],
+    '补齐 telegram 会话; 不重复已有, 不加归档的')
+  assert.equal(roster.size + add.length, 4, '合计 4 条 = GUI 可见数')
+})
+
+test('工作区成员补齐: 归档与空 id 一律不加', () => {
+  const add = workspaceMemberIdsToAdd(new Set(['a']), ['', 'a', 'b'], new Set(['b']))
+  assert.deepEqual(add, [], '空 id / 已存在 / 归档 都不加')
 })
