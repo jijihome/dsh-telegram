@@ -38,6 +38,7 @@ function makeFactory() {
     async create(request) { requests.push({ kind: 'create', ...request }); return handleFor(String(request.sessionId)) },
     async resume(request) { requests.push({ kind: 'resume', ...request }); return handleFor(String(request.sessionId)) },
     getLive() { return undefined },
+    setSelection() { return true },
   }
 }
 
@@ -201,4 +202,23 @@ test('宿主无默认 preset 时不传该字段(交给宿主默认行为)', asyn
   await sessions.rotate(11, 'bot-a')
   const create = [...factory.requests].reverse().find(r => r.kind === 'create')
   assert.equal('agentPreset' in create, false, '无 preset 时不应凭空塞字段')
+})
+
+test('rotate 后 chat 的模型选择仍生效(不被判为过期而回退宿主默认) —— 回归', async () => {
+  const env = makeEnv()
+  const factory = makeFactory()
+  const sessions = makeManager(env, factory, 'E:/ws')
+  const chatId = 42
+
+  await sessions.getOrCreate(chatId, 'bot-a')
+  sessions.setModel(chatId, 'bot-a', 'api-bridge', 'zhipu-glm-5.3')
+  assert.equal(sessions.modelInfo(chatId, 'bot-a').source, 'chat', '切换模型后来源应为本 chat')
+
+  const rotated = await sessions.rotate(chatId, 'bot-a')
+
+  const info = sessions.modelInfo(chatId, 'bot-a')
+  assert.equal(info.source, 'chat', '换会话后模型选择不应变回宿主默认')
+  assert.equal(info.model, 'zhipu-glm-5.3', '模型应保持用户所选')
+  assert.equal(rotated.model, 'zhipu-glm-5.3', 'binding 也应带上用户所选模型')
+  assert.equal(rotated.provider, 'api-bridge')
 })
