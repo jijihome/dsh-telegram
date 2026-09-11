@@ -46,11 +46,13 @@ export declare function indexSessionLogs(sessionsRoot: string): Map<string, {
  */
 export declare function decodeSessionId(encoded: string): string;
 /**
- * Title + last-activity time from one session log.
+ * Title + last-activity time + blank flag from one session log.
  *
  * The title is the first user message's first non-empty line, truncated — the
- * same fact the host derives its title projection from. Returns `{}` when the log
- * cannot be read; callers then keep whatever they had.
+ * same fact the host derives its title projection from. `blank` mirrors the
+ * host's rule: a Session stops being blank at its first `turn/start`, so a log
+ * without one is an abandoned empty session (the GUI hides those). Returns what
+ * it could read; callers keep whatever they had for the missing parts.
  *
  * @param logPath - path to `session.v3.jsonl.zstd`.
  * @returns the summary, best effort.
@@ -58,4 +60,5 @@ export declare function decodeSessionId(encoded: string): string;
 export declare function readSessionSummary(logPath: string): {
     title?: string;
     updatedAt?: number;
+    blank?: boolean;
 };

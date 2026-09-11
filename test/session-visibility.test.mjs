@@ -10,7 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isUserFacingSessionId, isOwnSessionId, workspaceMemberIdsToAdd } from '../lib/core/session-visibility.js'
+import { isUserFacingSessionId, isOwnSessionId, workspaceMemberIdsToAdd, dropBlankSessions } from '../lib/core/session-visibility.js'
 
 test('顶层会话( session-<uuid> ) 可见', () => {
   assert.equal(isUserFacingSessionId('session-222ff68d-5093-4612-abec-a3685d0f2359'), true)
@@ -78,4 +78,31 @@ test('工作区成员补齐: D:\\repos 实测应得 4 条(与 GUI 一致)', () =
 test('工作区成员补齐: 归档与空 id 一律不加', () => {
   const add = workspaceMemberIdsToAdd(new Set(['a']), ['', 'a', 'b'], new Set(['b']))
   assert.deepEqual(add, [], '空 id / 已存在 / 归档 都不加')
+})
+
+test('空会话(blank)隐藏, 但当前会话例外 —— 与 GUI sessionVisible 一致', () => {
+  const list = [
+    { id: 'session-blank-1', blank: true },
+    { id: 'session-real-1', blank: false },
+    { id: 'telegram:bot-a:1:g7' },            // 判不出 blank 的按可见处理
+    { id: 'session-blank-2', blank: true },
+  ]
+  const visible = dropBlankSessions(list, 'session-blank-2')
+  assert.deepEqual(visible.map(s => s.id), ['session-real-1', 'telegram:bot-a:1:g7', 'session-blank-2'],
+    '隐藏空会话, 但当前会话(即使空)保留')
+  assert.deepEqual(dropBlankSessions(list, undefined).map(s => s.id),
+    ['session-real-1', 'telegram:bot-a:1:g7'], '无当前会话时空会话全隐藏')
+})
+
+test('D:\\repos 实测 5 条里 session-222ff68d 是空会话 → 最终 4 条(与 GUI 一致)', () => {
+  // 2026-09-11 用户实测: 列表多出 session-222ff68d(Web 里没有), 原因是它 blank
+  const roster = [
+    { id: 'telegram:bot-a:6434599758:g7', blank: false },
+    { id: 'telegram:bot-a:6434599758:g6', blank: false },
+    { id: 'session-e136e1ff-d52d-4d09-90ac-3b256d539bba', blank: false },
+    { id: 'session-222ff68d-5093-4612-abec-a3685d0f2359', blank: true },
+  ]
+  const visible = dropBlankSessions(roster, 'telegram:bot-a:6434599758:g7')
+  assert.equal(visible.length, 3, '空会话被隐藏')
+  assert.ok(!visible.some(s => s.id.includes('222ff68d')))
 })

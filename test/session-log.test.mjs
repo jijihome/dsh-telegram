@@ -80,3 +80,22 @@ test('indexSessionLogs 按原始 id 与目录拼写都能命中', () => {
 test('日志不可读时安静返回空(不抛)', () => {
   assert.deepEqual(readSessionSummary('E:/definitely-missing/session.v3.jsonl.zstd'), {})
 })
+
+test('blank 判定: 有 turn/start 的会话不是空会话', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-tg-log-'))
+  const logPath = writeSessionLog(join(root, 'ws', 'session-a'), { type: 'session', id: 'session-a' }, [
+    { type: 'turn/start', data: {} },
+    { type: 'user/message', data: { content: [{ type: 'text', text: '你好' }] } },
+  ])
+  const summary = readSessionSummary(logPath)
+  assert.equal(summary.blank, false, '跑过回合 → 不是空会话')
+  assert.equal(summary.title, '你好')
+})
+
+test('blank 判定: 没有 turn/start 的会话是空会话(仅 header, GUI 会隐藏)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-tg-log-'))
+  const logPath = writeSessionLog(join(root, 'ws', 'session-b'), { type: 'session', id: 'session-b' }, [])
+  const summary = readSessionSummary(logPath)
+  assert.equal(summary.blank, true, '只有 header → 空会话')
+  assert.equal(summary.title, undefined)
+})

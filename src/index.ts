@@ -36,7 +36,7 @@ import { Delivery } from './telegram/delivery.js'
 import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, readHostInstance, writeHostInstance, resolveRestartNotice } from './core/host.js'
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { registerInteractions } from './interactions/interaction-listener.js'
-import { isUserFacingSessionId, workspaceMemberIdsToAdd } from './core/session-visibility.js'
+import { isUserFacingSessionId, workspaceMemberIdsToAdd, dropBlankSessions } from './core/session-visibility.js'
 import { indexSessionLogs, readSessionSummary, encodeSessionId } from './core/session-log.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
@@ -332,8 +332,8 @@ export function apply(ctx: Context, config: TelegramConfig) {
    * no-op (the reported bot-a/bot-b asymmetry: the bot whose active session came
    * from the list looked fine).
    */
-  const hostSessionRoster = async (): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }>> => {
-    interface RosterEntry { id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number }
+  const hostSessionRoster = async (): Promise<Array<{ id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; blank?: boolean }>> => {
+    interface RosterEntry { id: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; blank?: boolean }
     const byId = new Map<string, RosterEntry>()
     // Skip sub-agent sessions: they are child turns, not user-facing
     // conversations, so they should not appear in the sessions picker. The raw
@@ -348,7 +348,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
       } catch { return new Set<string>() }
     })()
     /** Merge one entry, letting a later source only FILL gaps (never erase cwd). */
-    const merge = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown } | undefined) => {
+    const merge = (s: { id?: string; cwd?: string; title?: string; displayTitle?: string; updatedAt?: number; origin?: unknown; blank?: boolean } | undefined) => {
       if (s === undefined || !s.id || isSubagent(s) || archived.has(s.id)) return
       const existing = byId.get(s.id)
       byId.set(s.id, {
@@ -357,6 +357,8 @@ export function apply(ctx: Context, config: TelegramConfig) {
         title: s.title ?? existing?.title,
         displayTitle: s.displayTitle ?? existing?.displayTitle ?? s.title ?? existing?.title ?? s.id,
         updatedAt: Math.max(existing?.updatedAt ?? 0, s.updatedAt ?? 0),
+        // 任一来源说「空会话」即视为空（GUI 会隐藏空会话，仅当前会话例外）。
+        blank: s.blank ?? existing?.blank,
       })
     }
     // 0) 活会话注册表 + 投影：GUI 读的就是这一层，也是插件自建（telegram:…）会话
@@ -384,12 +386,14 @@ export function apply(ctx: Context, config: TelegramConfig) {
         // （见宿主 api-session-controller/list.js）。只取 lastPromptAt 会让没有
         // prompt 元数据的插件自建会话显示成 `--`。
         const header = s?.header as { cwd?: string; origin?: unknown; createdAt?: number } | undefined
+        const meta = projections?.stateOf?.(s, 'sessionListMetadata') as { val?: { blank?: unknown } } | undefined
         merge({
           id,
           cwd: header?.cwd,
           title: projString(s, 'title'),
           updatedAt: Math.max(header?.createdAt ?? 0, projNumber(s, 'sessionListMetadata', 'lastPromptAt') ?? 0),
           origin: header?.origin,
+          blank: typeof meta?.val?.blank === 'boolean' ? meta.val.blank : undefined,
         })
       }
     } catch { /* best-effort: the projection cache below still fills the roster */ }
@@ -403,7 +407,7 @@ export function apply(ctx: Context, config: TelegramConfig) {
             identity?: { cwd?: string; createdAt?: number; origin?: unknown }
             rows?: {
               title?: { val?: unknown }
-              sessionListMetadata?: { val?: { lastPromptAt?: number } }
+              sessionListMetadata?: { val?: { lastPromptAt?: number; blank?: unknown } }
               modelSelection?: { val?: { next?: unknown; lastUsed?: unknown } }
             }
           }
@@ -418,7 +422,16 @@ export function apply(ctx: Context, config: TelegramConfig) {
         if (!isUserFacingSessionId(id)) continue
         const title = typeof rec?.rows?.title?.val === 'string' ? rec.rows.title.val : undefined
         const updatedAt = rec?.rows?.sessionListMetadata?.val?.lastPromptAt ?? rec?.identity?.createdAt
-        merge({ id, cwd: rec?.identity?.cwd, title, displayTitle: title ?? id, updatedAt, origin: rec?.identity?.origin })
+        const blank = rec?.rows?.sessionListMetadata?.val?.blank
+        merge({
+          id,
+          cwd: rec?.identity?.cwd,
+          title,
+          displayTitle: title ?? id,
+          updatedAt,
+          origin: rec?.identity?.origin,
+          blank: typeof blank === 'boolean' ? blank : undefined,
+        })
       }
     } catch { /* best-effort: the gateway below may still fill the roster */ }
     // 2) Typert gateway RPC: session.list -> { items: [ { sessionId, cwd?,
@@ -636,14 +649,18 @@ export function apply(ctx: Context, config: TelegramConfig) {
                 cwd: ws?.path ?? chatCwd,
                 displayTitle: summary.title ?? id,
                 updatedAt: summary.updatedAt ?? log?.mtimeMs ?? 0,
+                blank: summary.blank,
               })
             }
           }
         } catch { /* workspace membership is a best-effort enrich */ }
-        if (scope.allowHostSessions) return roster
+        // 空会话（尚未跑过任何回合）在 GUI 里被隐藏，仅保留当前会话那一条。
+        const activeId = sessions.activeSessionId(chatId, botId)
+        const visible = dropBlankSessions(roster, activeId)
+        if (scope.allowHostSessions) return visible
         // Strict default: only sessions this bot owns (its own agents, its
         // config bindings, and chats it persisted). Foreign sessions are hidden.
-        const out = roster.filter(s => owned.has(s.id))
+        const out = visible.filter(s => owned.has(s.id))
         const seen = new Set(out.map(s => s.id))
         for (const id of owned) {
           if (seen.has(id)) continue

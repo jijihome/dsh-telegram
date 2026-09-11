@@ -48,3 +48,21 @@ export declare function isOwnSessionId(id: string): boolean;
  * @returns member ids worth adding, in membership order.
  */
 export declare function workspaceMemberIdsToAdd(existing: ReadonlySet<string>, members: readonly string[], archived: ReadonlySet<string>): string[];
+/**
+ * Apply the host's blank rule to a roster.
+ *
+ * The GUI's `sessionVisible` hides a Session whose folded prefix contains no turn
+ * (`blank`) unless it is the one currently selected — that provisional "New
+ * Session" row is the only blank it shows. A workspace-membership roster built
+ * from disk therefore lists abandoned empty sessions (they appear in the
+ * Workspace account but never ran a turn), which is exactly the row the user sees
+ * here but not in the Web GUI.
+ *
+ * @param list - candidate sessions, newest first is caller's concern.
+ * @param activeId - the session this chat currently drives (kept even when blank).
+ * @returns the list without abandoned blank sessions.
+ */
+export declare function dropBlankSessions<T extends {
+    id: string;
+    blank?: boolean;
+}>(list: readonly T[], activeId: string | undefined): T[];

@@ -139,36 +139,47 @@ export function decodeSessionId(encoded: string): string {
 }
 
 /**
- * Title + last-activity time from one session log.
+ * Title + last-activity time + blank flag from one session log.
  *
  * The title is the first user message's first non-empty line, truncated — the
- * same fact the host derives its title projection from. Returns `{}` when the log
- * cannot be read; callers then keep whatever they had.
+ * same fact the host derives its title projection from. `blank` mirrors the
+ * host's rule: a Session stops being blank at its first `turn/start`, so a log
+ * without one is an abandoned empty session (the GUI hides those). Returns what
+ * it could read; callers keep whatever they had for the missing parts.
  *
  * @param logPath - path to `session.v3.jsonl.zstd`.
  * @returns the summary, best effort.
  */
-export function readSessionSummary(logPath: string): { title?: string; updatedAt?: number } {
-  const out: { title?: string; updatedAt?: number } = {}
+export function readSessionSummary(logPath: string): { title?: string; updatedAt?: number; blank?: boolean } {
+  const out: { title?: string; updatedAt?: number; blank?: boolean } = {}
   try { out.updatedAt = statSync(logPath).mtimeMs } catch { /* keep undefined */ }
+  let sawTurn = false
   try {
     const buffer = readFileSync(logPath)
-    for (const frame of scanFrames(buffer)) {
+    const frames = scanFrames(buffer)
+    if (frames.length === 0) return out
+    for (const frame of frames) {
       let text: string
       try { text = zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8') } catch { continue }
       for (const line of text.split('\n')) {
         if (line === '') continue
         let event: { type?: unknown; data?: { content?: Array<{ type?: string; text?: string }> } }
         try { event = JSON.parse(line) } catch { continue }
+        if (event.type === 'turn/start') {
+          sawTurn = true
+          if (out.title !== undefined) return { ...out, blank: false }
+          continue
+        }
         if (event.type !== 'user/message') continue
         const blocks = event.data?.content ?? []
         const raw = blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n')
         const firstLine = raw.split('\n').map(s => s.trim()).find(s => s !== '')
         if (firstLine === undefined) continue
         out.title = firstLine.length > TITLE_MAX ? `${firstLine.slice(0, TITLE_MAX)}…` : firstLine
-        return out
+        if (sawTurn) return { ...out, blank: false }
       }
     }
-  } catch { /* best effort */ }
+    out.blank = !sawTurn
+  } catch { /* best effort: an unreadable log yields no blank verdict either */ }
   return out
 }
