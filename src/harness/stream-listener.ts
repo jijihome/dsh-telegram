@@ -212,6 +212,8 @@ export class StreamListener {
           // Record the turn so B's stall watchdog will not double-report it.
           const turn = this.openTurn.get(sessionId)
           if (turn !== undefined) this.waitNotified.set(sessionId, turn)
+          // Agent 已暂停等待输入 → 不再产出, typing 保活必须停, 否则会一直转。
+          delivery.stopTyping(route.chatId)
           void delivery.endLive(route.chatId)
           void delivery.sendFinal(route.chatId, '⏳ agent 已暂停，正在等待你的回复/继续…')
         }
@@ -378,6 +380,8 @@ export class StreamListener {
       for (const route of routes) {
         const delivery = this.deliveries.get(route.botId)
         if (delivery !== undefined) {
+          // 停滞 = 长时间无输出、无进行中的步骤 → 停止 typing 保活(避免一直转)。
+          delivery.stopTyping(route.chatId)
           void delivery.sendFinal(
             route.chatId,
             `⚠️ 已 ${Math.round(this.stallNoticeMs / 1000)} 秒无输出且无进行中的步骤,agent 可能已停滞。可发消息催一下,或 /stop 取消。`,
@@ -398,8 +402,15 @@ export class StreamListener {
     this.stallWatch.delete(sessionId)
   }
 
-  /** End the live segment and report an agent-level failure to the bot. */
+  /**
+   * End the live segment and report an agent-level failure to the bot.
+   *
+   * This is the fallback for a driver-level error that never produced a
+   * `turn/end` (network loss, host-side failure), so it must also stop the typing
+   * keep-alive — otherwise the "typing…" indicator would spin forever.
+   */
   private async applyAgentFailure(chatId: number, delivery: Delivery, detail: string): Promise<void> {
+    delivery.stopTyping(chatId)
     await delivery.endLive(chatId)
     await delivery.sendFinal(chatId, `⚠️ 步骤出错: ${detail}`)
   }

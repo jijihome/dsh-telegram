@@ -42,6 +42,8 @@ export declare class Delivery {
     private readonly answered;
     /** Per-chat keep-alive timer for the "typing…" chat action. */
     private readonly typingTimers;
+    /** Per-chat start time of the current typing keep-alive (safety cap). */
+    private readonly typingStarted;
     constructor(options: DeliveryOptions);
     /** Append the exact text about to be sent/edited to the forward log file. */
     private logForward;

@@ -43,6 +43,8 @@ interface LiveSegment {
 const FLUSH_INTERVAL_MS = 900
 /** Telegram shows a chat action for ~5s; refresh before it fades. */
 const TYPING_REFRESH_MS = 4000
+/** Hard stop: never keep the indicator alive longer than this without a turn end. */
+const TYPING_MAX_MS = 30 * 60_000
 /** One extra retry after a Telegram 429 back-off. */
 const RETRY_AFTER = /retry after (\d+)/i
 
@@ -75,6 +77,8 @@ export class Delivery {
   private readonly answered = new Map<number, boolean>()
   /** Per-chat keep-alive timer for the "typing…" chat action. */
   private readonly typingTimers = new Map<number, NodeJS.Timeout>()
+  /** Per-chat start time of the current typing keep-alive (safety cap). */
+  private readonly typingStarted = new Map<number, number>()
 
   constructor(options: DeliveryOptions) {
     this.client = options.client
@@ -142,13 +146,25 @@ export class Delivery {
   startTyping(chatId: number): void {
     if (this.typingTimers.has(chatId)) return
     void this.typing(chatId)
-    const timer = setInterval(() => { void this.typing(chatId) }, TYPING_REFRESH_MS)
+    this.typingStarted.set(chatId, Date.now())
+    const timer = setInterval(() => {
+      // Safety cap: a turn that never ends (host hang, lost process) must not
+      // keep the indicator spinning forever.
+      const started = this.typingStarted.get(chatId) ?? Date.now()
+      if (Date.now() - started > TYPING_MAX_MS) {
+        this.logger?.warn(`[tg] typing 保活超过 ${Math.round(TYPING_MAX_MS / 60_000)} 分钟仍未结束,自动停止`)
+        this.stopTyping(chatId)
+        return
+      }
+      void this.typing(chatId)
+    }, TYPING_REFRESH_MS)
     timer.unref?.()
     this.typingTimers.set(chatId, timer)
   }
 
   /** Stop refreshing the indicator (turn finished / answer delivered). */
   stopTyping(chatId: number): void {
+    this.typingStarted.delete(chatId)
     const timer = this.typingTimers.get(chatId)
     if (timer === undefined) return
     clearInterval(timer)
@@ -159,6 +175,7 @@ export class Delivery {
   stopAllTyping(): void {
     for (const timer of this.typingTimers.values()) clearInterval(timer)
     this.typingTimers.clear()
+    this.typingStarted.clear()
   }
 
   /**

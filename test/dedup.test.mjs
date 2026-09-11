@@ -161,6 +161,8 @@ test('assistant-final does not duplicate when the live message already carried t
     sendFinal: async () => { sends += 1 },
     endLive: async () => {},
     typing: async () => {},
+    startTyping: () => {},
+    stopTyping: () => {},
     appendDelta: async () => {},
     // The answer was streamed into a live message -> finalizeLive reports it
     // so the caller must NOT send a second (duplicate) final message.
