@@ -75,16 +75,22 @@ test('turn/start → 开始 typing 保活', () => {
   assert.equal(delivery.typingCalls.starts, 1, '回合开始应启动 typing 保活')
 })
 
-test('assistant 定稿 → 停止 typing(答复已送达)', async () => {
+test('assistant 定稿不结束 typing: 同回合多条消息全程保持, turn/end 才停', async () => {
   const { ctx, delivery } = build()
   ctx.handlers['session/event'](SESSION, { type: 'turn/start', data: { turn: 1 } })
-  ctx.handlers['session/event'](SESSION, {
-    type: 'assistant/message',
-    data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '答案' }] } },
-  })
-  // 该分支在 await finalizeLive 之后才停 typing, 属微任务, 稍等再断言。
+  // 一个回合里 agent 常连发多条消息(多步)
+  for (const text of ['第一条', '第二条', '第三条']) {
+    ctx.handlers['session/event'](SESSION, {
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { content: [{ type: 'text', text }] } },
+    })
+  }
   await sleep(10)
-  assert.ok(delivery.typingCalls.stops >= 1, '答复送达后必须停 typing')
+  assert.equal(delivery.typingCalls.stops, 0, '回合未结束不应停 typing')
+  assert.equal(delivery.typingCalls.starts, 1, '整段对话只需一次保活')
+
+  ctx.handlers['session/event'](SESSION, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.ok(delivery.typingCalls.stops >= 1, 'turn/end 才停 typing')
 })
 
 test('turn/end(aborted) 用户在 GUI 停止 → 停止 typing', () => {
