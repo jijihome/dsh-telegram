@@ -40,6 +40,8 @@ export declare class Delivery {
      * same answer as a second message. Reset on the next `turn/start`.
      */
     private readonly answered;
+    /** Per-chat keep-alive timer for the "typing…" chat action. */
+    private readonly typingTimers;
     constructor(options: DeliveryOptions);
     /** Append the exact text about to be sent/edited to the forward log file. */
     private logForward;
@@ -52,6 +54,21 @@ export declare class Delivery {
     sendMenu(chatId: number, text: string, keyboard?: TelegramInlineKeyboard): Promise<void>;
     /** Show the typing indicator (fire and forget). */
     typing(chatId: number): Promise<void>;
+    /**
+     * Keep the "typing…" indicator alive until {@link stopTyping}.
+     *
+     * Telegram shows a chat action for only a few seconds, so one send fades while
+     * a long turn is still running. Re-send it on an interval; Telegram clears the
+     * indicator by itself when a message arrives, so stopping the interval is all
+     * that is needed once the answer is delivered.
+     *
+     * @param chatId - chat to keep typing in.
+     */
+    startTyping(chatId: number): void;
+    /** Stop refreshing the indicator (turn finished / answer delivered). */
+    stopTyping(chatId: number): void;
+    /** Stop every typing keep-alive (bot stop / plugin unload). */
+    stopAllTyping(): void;
     /**
      * Append a text delta to the chat's live segment, scheduling a throttled
      * in-place edit. Seals (and re-sends) segments that outgrow the cap.

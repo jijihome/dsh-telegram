@@ -41,6 +41,8 @@ interface LiveSegment {
 
 /** Flush edits at most once per this interval (Telegram: ~1 msg/sec/chat). */
 const FLUSH_INTERVAL_MS = 900
+/** Telegram shows a chat action for ~5s; refresh before it fades. */
+const TYPING_REFRESH_MS = 4000
 /** One extra retry after a Telegram 429 back-off. */
 const RETRY_AFTER = /retry after (\d+)/i
 
@@ -71,6 +73,8 @@ export class Delivery {
    * same answer as a second message. Reset on the next `turn/start`.
    */
   private readonly answered = new Map<number, boolean>()
+  /** Per-chat keep-alive timer for the "typing…" chat action. */
+  private readonly typingTimers = new Map<number, NodeJS.Timeout>()
 
   constructor(options: DeliveryOptions) {
     this.client = options.client
@@ -123,6 +127,38 @@ export class Delivery {
     } catch (error) {
       this.logger?.warn(`[tg] chat action typing failed: ${messageOf(error)}`)
     }
+  }
+
+  /**
+   * Keep the "typing…" indicator alive until {@link stopTyping}.
+   *
+   * Telegram shows a chat action for only a few seconds, so one send fades while
+   * a long turn is still running. Re-send it on an interval; Telegram clears the
+   * indicator by itself when a message arrives, so stopping the interval is all
+   * that is needed once the answer is delivered.
+   *
+   * @param chatId - chat to keep typing in.
+   */
+  startTyping(chatId: number): void {
+    if (this.typingTimers.has(chatId)) return
+    void this.typing(chatId)
+    const timer = setInterval(() => { void this.typing(chatId) }, TYPING_REFRESH_MS)
+    timer.unref?.()
+    this.typingTimers.set(chatId, timer)
+  }
+
+  /** Stop refreshing the indicator (turn finished / answer delivered). */
+  stopTyping(chatId: number): void {
+    const timer = this.typingTimers.get(chatId)
+    if (timer === undefined) return
+    clearInterval(timer)
+    this.typingTimers.delete(chatId)
+  }
+
+  /** Stop every typing keep-alive (bot stop / plugin unload). */
+  stopAllTyping(): void {
+    for (const timer of this.typingTimers.values()) clearInterval(timer)
+    this.typingTimers.clear()
   }
 
   /**

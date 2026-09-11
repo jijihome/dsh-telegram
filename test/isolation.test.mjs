@@ -421,6 +421,8 @@ function fakeDelivery(tag) {
     async sendFinal(_chatId, text) { texts.push(text) },
     async sendMenu() {},
     async typing() {},
+    startTyping() {},
+    stopTyping() {},
     async appendDelta(_chatId, delta) { texts.push(delta) },
     async finalizeLive() { return false },
     resetStream() {},

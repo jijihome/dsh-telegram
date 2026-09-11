@@ -44,6 +44,8 @@ function fakeDelivery() {
     async sendFinal(_chatId, text) { sent.push(text) },
     async endLive() {},
     async typing() {},
+    startTyping() {},
+    stopTyping() {},
     async appendDelta() {},
     async finalizeLive() { return false },
     resetStream() {},

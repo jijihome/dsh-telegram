@@ -48,6 +48,8 @@ function fakeDelivery() {
     async sendFinal(_chatId, text) { sent.push(text) },
     async endLive() { ended += 1 },
     async typing() {},
+    startTyping() {},
+    stopTyping() {},
     async appendDelta() {},
     // No live segment to finalize -> caller must send the final fresh.
     async finalizeLive() { return false },
