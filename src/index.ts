@@ -37,6 +37,7 @@ import { getHostInfo, scheduleRestart, readRestartMarker, clearRestartMarker, re
 import { readHostDefaultModel, resolveDshHome } from './core/host-default-model.js'
 import { registerInteractions } from './interactions/interaction-listener.js'
 import { isUserFacingSessionId, workspaceMemberIdsToAdd } from './core/session-visibility.js'
+import { indexSessionLogs, readSessionSummary, encodeSessionId } from './core/session-log.js'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -358,6 +359,36 @@ export function apply(ctx: Context, config: TelegramConfig) {
         updatedAt: Math.max(existing?.updatedAt ?? 0, s.updatedAt ?? 0),
       })
     }
+    // 0) 活会话注册表 + 投影：GUI 读的就是这一层，也是插件自建（telegram:…）会话
+    //    唯一有标题/时间的地方；origin 继续用于过滤子代理。
+    try {
+      const svc = (ctx.get as (k: string) => unknown)?.('sessions') as
+        { list?(): Array<{ id?: unknown; header?: { cwd?: string; origin?: unknown } }> } | undefined
+      const projections = (ctx.get as (k: string) => unknown)?.('sessionProjections') as
+        { stateOf?(session: unknown, key: string): unknown } | undefined
+      const projString = (session: unknown, key: string): string | undefined => {
+        const state = projections?.stateOf?.(session, key)
+        if (typeof state === 'string') return state === '' ? undefined : state
+        const val = (state as { val?: unknown } | undefined)?.val
+        return typeof val === 'string' && val !== '' ? val : undefined
+      }
+      const projNumber = (session: unknown, key: string, field: string): number | undefined => {
+        const state = projections?.stateOf?.(session, key) as { val?: Record<string, unknown> } | undefined
+        const value = state?.val?.[field]
+        return typeof value === 'number' ? value : undefined
+      }
+      for (const s of svc?.list?.() ?? []) {
+        const id = typeof s?.id === 'string' ? s.id : undefined
+        if (id === undefined) continue
+        merge({
+          id,
+          cwd: s?.header?.cwd,
+          title: projString(s, 'title'),
+          updatedAt: projNumber(s, 'sessionListMetadata', 'lastPromptAt'),
+          origin: s?.header?.origin,
+        })
+      }
+    } catch { /* best-effort: the projection cache below still fills the roster */ }
     // 1) Persisted projection cache: authoritative for cwd (identity.cwd).
     try {
       const sdir = join(dshHome, 'storages', 'session_projcache', 'sessions')
@@ -590,8 +621,18 @@ export function apply(ctx: Context, config: TelegramConfig) {
             const archived = new Set<string>(reg.archivedSessionIds ?? [])
             const ws = await reg.resolveByPath(chatCwd).catch(() => undefined)
             const add = workspaceMemberIdsToAdd(new Set(roster.map(s => s.id)), ws?.sessionIds ?? [], archived)
+            // 这些会话（多为插件自建）在投影缓存里没有条目：标题/时间改从会话日志取
+            // （文件名 mtime = 最后活动，首条 user/message = 标题），与 GUI 显示一致。
+            const logs = add.length > 0 ? indexSessionLogs(join(dshHome, 'sessions')) : undefined
             for (const id of add) {
-              roster.push({ id, cwd: ws?.path ?? chatCwd, displayTitle: id, updatedAt: 0 })
+              const log = logs?.get(id) ?? logs?.get(encodeSessionId(id))
+              const summary = log !== undefined ? readSessionSummary(log.path) : {}
+              roster.push({
+                id,
+                cwd: ws?.path ?? chatCwd,
+                displayTitle: summary.title ?? id,
+                updatedAt: summary.updatedAt ?? log?.mtimeMs ?? 0,
+              })
             }
           }
         } catch { /* workspace membership is a best-effort enrich */ }
