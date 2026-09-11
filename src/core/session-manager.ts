@@ -625,6 +625,12 @@ export class SessionManager {
           provider: model.provider,
           model: model.model,
           routeKey: key,
+          // Our own sessions must re-join their preset on resume, or a resumed chat
+          // loses its tool world. Foreign GUI sessions keep the composition their
+          // creator mounted.
+          ...(persisted.sessionId.startsWith('telegram:') && presetId !== undefined && presetId !== ''
+            ? { agentPreset: presetId }
+            : {}),
         })
         // Use the REAL resumed session id, not the template id: the two differ
         // whenever a chat is bound to a pre-existing (e.g. GUI) session, and

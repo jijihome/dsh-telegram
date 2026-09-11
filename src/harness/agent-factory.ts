@@ -48,6 +48,12 @@ export interface AgentResumeRequest {
   provider: string
   model: string
   routeKey: string
+  /**
+   * Preset to join on resume. Omitted for foreign (GUI/adopted) sessions, whose
+   * composition belongs to whoever created them. Our own sessions must re-join
+   * their preset or a resumed chat loses its tool world.
+   */
+  agentPreset?: string
 }
 
 export interface AgentFactoryLike {
@@ -110,8 +116,31 @@ export class DshAgentFactory implements AgentFactoryLike {
       },
       setup: (agentCtx) => {
         installModelSelection(agentCtx, ref)
+        // The preset COMPOSES the agent's model-facing world (tool schemas, prompt
+        // sections). `meta.agentPreset` only records the creation fact; without this
+        // mount the session runs with an empty tool world — no shell, no file tools.
+        // `mount` is the agent-presets service method that mounts (or reuses) the
+        // standing composition and joins this agent's scope key to it.
+        return this.mountPreset(agentCtx, request.agentPreset)
       },
     })
+  }
+
+  /**
+   * Join an agent scope to its agent-preset composition.
+   *
+   * Resolved through the service locator (not inject) so the plugin does not
+   * hard-depend on the preset package being installed; when the host has no
+   * `agentPresets` service (headless/minimal profiles) this is a no-op.
+   *
+   * @param agentCtx - the unpublished agent scope from `setup`.
+   * @param presetId - preset to mount; `undefined` lets the host pick its default.
+   */
+  private mountPreset(agentCtx: Context, presetId: string | undefined): Promise<void> {
+    const presets = (this.ctx.get as (k: string) => unknown)?.('agentPresets') as
+      { mount?(ctx: Context, id?: string): Promise<unknown> } | undefined
+    if (presets?.mount === undefined) return Promise.resolve()
+    return presets.mount(agentCtx, presetId).then(() => undefined)
   }
 
   resume(request: AgentResumeRequest): Promise<AgentHandle> {
@@ -124,6 +153,11 @@ export class DshAgentFactory implements AgentFactoryLike {
       },
       setup: (agentCtx) => {
         installModelSelection(agentCtx, ref)
+        // Only when the caller names a preset (our own sessions). A foreign session
+        // keeps the composition its creator mounted.
+        return request.agentPreset !== undefined && request.agentPreset !== ''
+          ? this.mountPreset(agentCtx, request.agentPreset)
+          : undefined
       },
     })
   }

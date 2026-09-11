@@ -44,6 +44,12 @@ export interface AgentResumeRequest {
     provider: string;
     model: string;
     routeKey: string;
+    /**
+     * Preset to join on resume. Omitted for foreign (GUI/adopted) sessions, whose
+     * composition belongs to whoever created them. Our own sessions must re-join
+     * their preset or a resumed chat loses its tool world.
+     */
+    agentPreset?: string;
 }
 export interface AgentFactoryLike {
     create(request: AgentCreateRequest): Promise<AgentHandle>;
@@ -74,6 +80,17 @@ export declare class DshAgentFactory implements AgentFactoryLike {
     private readonly selections;
     constructor(ctx: Context);
     create(request: AgentCreateRequest): Promise<AgentHandle>;
+    /**
+     * Join an agent scope to its agent-preset composition.
+     *
+     * Resolved through the service locator (not inject) so the plugin does not
+     * hard-depend on the preset package being installed; when the host has no
+     * `agentPresets` service (headless/minimal profiles) this is a no-op.
+     *
+     * @param agentCtx - the unpublished agent scope from `setup`.
+     * @param presetId - preset to mount; `undefined` lets the host pick its default.
+     */
+    private mountPreset;
     resume(request: AgentResumeRequest): Promise<AgentHandle>;
     /** Live agent lookup: the registry keeps one agent per session id. */
     getLive(sessionId: string): Agent | undefined;
