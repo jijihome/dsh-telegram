@@ -78,6 +78,12 @@ export interface SessionManagerOptions {
    * default, without waiting for the first message to spin the agent up.
    */
   sessionModelLookup?: (sessionId: string) => { provider: string; model: string } | undefined
+  /**
+   * 把新会话登记进 DSH 工作区（GUI 侧栏按工作区注册表的 sessionIds 分组；
+   * `agents.create` 只写会话头 cwd、不进名单，会话会落在「未分组」）。
+   * 仅在 fresh 建会话后触发；失败不得影响会话本身。
+   */
+  attachWorkspace?: (sessionId: string, cwd: string) => Promise<void>
   logger?: { warn(...args: unknown[]): void; error(...args: unknown[]): void }
 }
 
@@ -139,6 +145,7 @@ export class SessionManager {
   private readonly defaultCwd: string
   private readonly defaultSelection: SessionManagerOptions['defaultSelection']
   private readonly sessionModelLookup: SessionManagerOptions['sessionModelLookup']
+  private readonly attachWorkspace: SessionManagerOptions['attachWorkspace']
   private readonly logger: SessionManagerOptions['logger'] | undefined
   private readonly bindings = new Map<string, SessionBinding>()
   /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */
@@ -158,6 +165,7 @@ export class SessionManager {
     this.defaultCwd = options.defaultCwd
     this.defaultSelection = options.defaultSelection
     this.sessionModelLookup = options.sessionModelLookup
+    this.attachWorkspace = options.attachWorkspace
     this.logger = options.logger
   }
 
@@ -632,6 +640,14 @@ export class SessionManager {
     }
     this.bindings.set(key, binding)
     this.relevant.add(sessionId)
+    // Fresh sessions must join the workspace account for their cwd, or the GUI
+    // workspace sidebar groups them under「未分组」(grouping reads the registry's
+    // sessionIds membership, never the session's own cwd header).
+    if (mode === 'fresh' && this.attachWorkspace !== undefined) {
+      void Promise.resolve(this.attachWorkspace(sessionId, cwd)).catch(error => {
+        this.logger?.warn(`[tg] 工作区挂载失败(非致命) ${sessionId}: ${messageOf(error)}`)
+      })
+    }
     return binding
   }
 

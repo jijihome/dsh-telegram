@@ -179,6 +179,30 @@ export function apply(ctx: Context, config: TelegramConfig) {
   }
 
   const factory = new DshAgentFactory(ctx)
+  // GUI 工作区侧栏按工作区注册表的 sessionIds 名单分组；agents.create 只写会话头
+  // cwd、不进名单。fresh 建会话后把 session 挂到 cwd 对应的工作区，否则 GUI 显示
+  // 在「未分组」。（服务名 workspaceRegistry；结构化类型，宿主未启用时静默跳过。）
+  type WorkspaceLike = { path: string; attachSession(sessionId: string): Promise<void> }
+  type WorkspaceRegistryLike = {
+    resolveByPath(path: string): Promise<WorkspaceLike | undefined>
+    create(path: string, title?: string): Promise<WorkspaceLike>
+  }
+  const attachToWorkspace = async (sessionId: string, cwd: string): Promise<void> => {
+    try {
+      const registry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryLike }).workspaceRegistry
+      if (registry === undefined) {
+        line('WARN', `[tg] 宿主未启用 workspaceRegistry,会话 ${sessionId} 将显示在未分组`)
+        return
+      }
+      // 目录已是注册工作区则直接用；未注册则注册之(GUI 的「添加工作区」等效)。
+      const existing = await registry.resolveByPath(cwd).catch(() => undefined)
+      const workspace = existing ?? await registry.create(cwd)
+      await workspace.attachSession(sessionId)
+      line('WARN', `[tg] 已把会话 ${sessionId} 挂到工作区 ${workspace.path}`)
+    } catch (error) {
+      line('WARN', `[tg] 工作区挂载失败(非致命) ${sessionId}: ${String(error)}`)
+    }
+  }
   const sessions = new SessionManager({
     factory,
     stores,
@@ -186,8 +210,23 @@ export function apply(ctx: Context, config: TelegramConfig) {
     defaultCwd,
     defaultSelection: readDefaultSelection,
     sessionModelLookup: readSessionModelFromCache,
+    attachWorkspace: attachToWorkspace,
     logger,
   })
+
+  // 启动补挂：把各 bot 状态里已记录的 (sessionId, cwd) 也挂进工作区（幂等），
+  // 让历史 telegram 会话从「未分组」归位。延迟执行等 workspaceRegistry 就绪。
+  const sweepTimer = setTimeout(() => {
+    for (const scope of scopes) {
+      const store = stores.get(scope.botId)
+      if (store === undefined) continue
+      for (const chat of Object.values(store.allChats())) {
+        if (chat.sessionId === undefined || chat.sessionId === '' || chat.cwd === undefined || chat.cwd === '') continue
+        void attachToWorkspace(chat.sessionId, chat.cwd)
+      }
+    }
+  }, 2000)
+  sweepTimer.unref?.()
 
   // Announce which model each bot will use, so a mis-configured provider shows up
   // in the daemon log instead of only as a failed turn in Telegram.

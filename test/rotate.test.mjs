@@ -41,8 +41,8 @@ function makeFactory() {
   }
 }
 
-function makeManager(env, factory, defaultCwd = 'E:/ws') {
-  return new SessionManager({ factory, stores: env.stores, scopes: env.scopeById, defaultCwd, logger: silent })
+function makeManager(env, factory, defaultCwd = 'E:/ws', extra = {}) {
+  return new SessionManager({ factory, stores: env.stores, scopes: env.scopeById, defaultCwd, logger: silent, ...extra })
 }
 
 test('rotate 用当前选定的工作目录(而不是旧绑定的 cwd) —— 回归', async () => {
@@ -140,4 +140,25 @@ test('宿主已占用同名会话时自动换下一个候选(重启后 generatio
 
   assert.equal(binding.sessionId, 'telegram:bot-a:42:g2', '应跳过宿主已占用的 g1, 改用 g2')
   assert.deepEqual(requested, ['telegram:bot-a:42:g1', 'telegram:bot-a:42:g2'], '先试 g1, 冲突后改试 g2')
+})
+
+test('fresh 建会话后触发工作区挂载(attachWorkspace), 失败不影响会话', async () => {
+  const env = makeEnv()
+  const attached = []
+  const failOnce = { failed: false }
+  const attach = async (sessionId, cwd) => {
+    if (!failOnce.failed) { failOnce.failed = true; throw new Error('registry not ready') }
+    attached.push({ sessionId, cwd })
+  }
+  const sessions = makeManager(env, makeFactory(), 'E:/ws', { attachWorkspace: attach })
+
+  const a = await sessions.rotate(5, 'bot-a')   // 第一次挂载失败 → 会话仍成功
+  await new Promise(r => setTimeout(r, 10))     // 挂载是 fire-and-forget, 等微任务/计时落地
+  assert.ok(a.sessionId.startsWith('telegram:bot-a:5'), '挂载失败不阻断建会话')
+
+  const b = await sessions.rotate(5, 'bot-a')   // 第二次挂载成功
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(attached.length, 1, '重试后成功记录一次挂载')
+  assert.equal(attached[0].sessionId, b.sessionId)
+  assert.equal(attached[0].cwd, 'E:/ws')
 })

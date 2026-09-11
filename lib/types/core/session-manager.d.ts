@@ -76,6 +76,12 @@ export interface SessionManagerOptions {
         provider: string;
         model: string;
     } | undefined;
+    /**
+     * 把新会话登记进 DSH 工作区（GUI 侧栏按工作区注册表的 sessionIds 分组；
+     * `agents.create` 只写会话头 cwd、不进名单，会话会落在「未分组」）。
+     * 仅在 fresh 建会话后触发；失败不得影响会话本身。
+     */
+    attachWorkspace?: (sessionId: string, cwd: string) => Promise<void>;
     logger?: {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
@@ -118,6 +124,7 @@ export declare class SessionManager {
     private readonly defaultCwd;
     private readonly defaultSelection;
     private readonly sessionModelLookup;
+    private readonly attachWorkspace;
     private readonly logger;
     private readonly bindings;
     /** Bound chats keyed by route key (`botId:chatId`) or legacy bare `chatId`. */
