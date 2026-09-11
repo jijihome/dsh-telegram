@@ -69,6 +69,23 @@ export interface MenuCtx {
     getHostInfo(): string;
     /** Schedule a host dsh restart; returns a user-facing confirmation text. */
     restartDsh(): string;
+    /**
+     * 新建会话向导的草稿（每个 chat 一份）：各步选中的模型/工作方式先记在这里，
+     * 最后一步落盘再创建会话。向导期间跨多次 callback，必须有共享状态。
+     */
+    draft: {
+        read(): {
+            provider?: string;
+            model?: string;
+            presetId?: string;
+        };
+        patch(next: {
+            provider?: string;
+            model?: string;
+            presetId?: string;
+        }): void;
+        reset(): void;
+    };
 }
 /** Result of handling one menu callback: text + optional follow-up keyboard. */
 export interface MenuResult {

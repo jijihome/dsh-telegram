@@ -454,6 +454,12 @@ export function apply(ctx: Context, config: TelegramConfig) {
   }
 
   /**
+   * 新建会话向导的草稿（每个 (bot, chat) 一份）。向导跨多次 callback，选中项必须
+   * 存在插件级状态里；创建完成或取消时清空。
+   */
+  const newSessionDrafts = new Map<string, { provider?: string; model?: string; presetId?: string }>()
+
+  /**
    * Build the menu context for one (chat, bot) pair. Every capability is bound
    * to that bot's scope and store, so a menu action can only ever touch its own
    * tenant — host-wide visibility requires `allowHostSessions`.
@@ -470,6 +476,14 @@ export function apply(ctx: Context, config: TelegramConfig) {
       delivery: deliveries.get(botId) as never,
       sessions,
       store,
+      draft: {
+        read: () => newSessionDrafts.get(routeKey(botId, chatId)) ?? {},
+        patch: (next) => {
+          const key = routeKey(botId, chatId)
+          newSessionDrafts.set(key, { ...(newSessionDrafts.get(key) ?? {}), ...next })
+        },
+        reset: () => { newSessionDrafts.delete(routeKey(botId, chatId)) },
+      },
       workspaceRoots: scope.workspaceRoots,
       defaultCwd,
       provider: scope.provider,

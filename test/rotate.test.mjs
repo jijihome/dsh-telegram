@@ -79,21 +79,37 @@ test('rotate 铸新会话 id 并清掉配置绑定', async () => {
   assert.equal(sessions.activeSessionId(chatId, 'bot-a'), rotated.sessionId, '活动会话应指向新会话')
 })
 
-test('新建会话确认文案含 新会话/工作目录/已丢弃旧会话', async () => {
+test('新建会话(向导 skip 两步入)确认文案含 新会话/工作目录/已丢弃旧会话', async () => {
+  let draft = {}
   const ctx = {
     chatId: 1,
     botId: 'bot-a',
+    provider: 'api-bridge',
+    model: 'm',
+    draft: { read: () => ({ ...draft }), patch: (n) => { draft = { ...draft, ...n } }, reset: () => { draft = {} } },
+    getCurrentModel: () => ({ provider: 'api-bridge', model: 'm' }),
+    getCurrentPresetName: async () => '标准',
+    listModels: async () => [{ provider: 'api-bridge', model: 'm' }],
+    listPresets: async () => [{ id: 'standard', name: '标准' }],
+    getCurrentPresetId: async () => 'standard',
+    setModel: async () => {},
+    setPreset: async () => {},
     sessions: {
       activeSessionId: () => 'telegram:bot-a:1:g1',
       rotate: async () => ({ sessionId: 'telegram:bot-a:1:g2', cwd: 'E:/projects/demo' }),
     },
   }
-  const res = await handleMenuCallback('menu:new', ctx)
+  // 向导第 1 步 → 跳过模型 → 第 2 步 → 跳过工作方式 → 创建
+  await handleMenuCallback('menu:new', ctx)
+  await handleMenuCallback('nw:skip:m', ctx)
+  const res = await handleMenuCallback('nw:skip:p', ctx)
   assert.ok(res.text.includes('已开启新会话'), res.text)
-  assert.ok(res.text.includes('已丢弃当前上下文'), '文案说明会丢弃上下文(合并「清除会话」后语义更明确)')
+  assert.ok(res.text.includes('已丢弃当前上下文'), '文案说明会丢弃上下文')
   assert.ok(res.text.includes('telegram:bot-a:1:g2'), '显示新会话 id')
   assert.ok(res.text.includes('E:/projects/demo'), '显示工作目录')
   assert.ok(res.text.includes('telegram:bot-a:1:g1'), '显示被丢弃的旧会话')
+  assert.ok(res.text.includes('• 模型:'), '显示生效模型')
+  assert.ok(res.text.includes('• 工作方式:'), '显示生效工作方式')
 })
 
 test('「清除会话」已合并: 旧回调 menu:clear 不再存在', async () => {

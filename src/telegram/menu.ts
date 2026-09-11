@@ -52,6 +52,15 @@ export interface MenuCtx {
   getHostInfo(): string
   /** Schedule a host dsh restart; returns a user-facing confirmation text. */
   restartDsh(): string
+  /**
+   * 新建会话向导的草稿（每个 chat 一份）：各步选中的模型/工作方式先记在这里，
+   * 最后一步落盘再创建会话。向导期间跨多次 callback，必须有共享状态。
+   */
+  draft: {
+    read(): { provider?: string; model?: string; presetId?: string }
+    patch(next: { provider?: string; model?: string; presetId?: string }): void
+    reset(): void
+  }
 }
 
 /** Result of handling one menu callback: text + optional follow-up keyboard. */
@@ -133,6 +142,7 @@ export async function handleMenuCallback(data: string, ctx: MenuCtx): Promise<Me
       if (data.startsWith('model:')) return doModelPick(data, ctx)
       if (data.startsWith('preset:')) return doPresetPick(data, ctx)
       if (data.startsWith('session:')) return doSessionPick(data, ctx)
+      if (data.startsWith('nw:')) return handleNewWizard(data, ctx)
       return { text: '未知菜单项', keyboard: mainMenuKeyboard() }
   }
 }
@@ -142,23 +152,170 @@ function rotatedText(
   title: string,
   binding: { sessionId: string; cwd: string },
   previousSessionId: string | undefined,
+  extra: string[] = [],
 ): string {
   const lines = [title, `• 新会话: ${binding.sessionId}`, `• 工作目录: ${binding.cwd}`]
   if (previousSessionId !== undefined && previousSessionId !== '' && previousSessionId !== binding.sessionId) {
     lines.push(`• 已丢弃: ${previousSessionId}`)
   }
+  lines.push(...extra)
   lines.push('下一条消息即在新会话中进行;可在「📊 状态」核对。')
   return lines.join('\n')
 }
 
-/** New (rotate to a fresh session). 「清除会话」曾与此完全相同, 已合并。 */
+/* ------------------------------------------------------------------ 新建会话向导
+ * 三步式：1) 选模型 → 2) 选工作方式 → 创建。每步都能「用当前」跳过或取消；
+ * 选中的模型/工作方式先记进 draft，最后一步先落盘再 rotate，这样新会话真正
+ * 带上这两个选择（create 时读取 per-chat 模型与 agentPreset）。
+ */
+
+/** 向导入口：清空草稿并进入第 1 步（选模型）。 */
 async function doNew(ctx: MenuCtx): Promise<MenuResult> {
+  ctx.draft.reset()
+  return newModelStep(ctx)
+}
+
+/** 向导第 1 步：选模型。 */
+async function newModelStep(ctx: MenuCtx): Promise<MenuResult> {
+  const current = ctx.getCurrentModel()
+  let models: Array<{ provider: string; model: string }>
+  try {
+    models = await ctx.listModels()
+  } catch {
+    models = [{ provider: ctx.provider, model: ctx.model }]
+  }
+  const CAP = 40
+  const shown = models.slice(0, CAP)
+  const isCurrent = (m: { provider: string; model: string }) =>
+    m.provider === current.provider && m.model === current.model
+  const CHECK = '\u2705'
+  const items = shown.map((m, i) => ({
+    provider: m.provider,
+    model: m.model,
+    n: i + 1,
+    label: `${i + 1}. ${isCurrent(m) ? CHECK + ' ' : ''}\`${m.model}\``,
+  }))
+  const groups = new Map<string, typeof items>()
+  for (const item of items) {
+    const list = groups.get(item.provider) ?? []
+    list.push(item)
+    groups.set(item.provider, list)
+  }
+  const textLines = [
+    `🆕 **新建会话** · 第 1/2 步:选择模型`,
+    `（当前 \`${current.model}\`;点序号选择,或选「用当前模型」跳过）`,
+  ]
+  for (const [provider, group] of groups) {
+    textLines.push('')
+    textLines.push(`**${provider}**`)
+    for (const item of group) textLines.push(`　${item.label}`)
+  }
+  if (models.length > CAP) textLines.push('', `…（共 ${models.length} 个，仅显示前 ${CAP}）`)
+
+  const rows: Array<Array<[string, string]>> = []
+  let row: Array<[string, string]> = []
+  items.forEach((item) => {
+    row.push([`${isCurrent(item) ? CHECK + ' ' : ''}${item.n}`, `nw:m:${item.n - 1}`])
+    if (row.length === 5) {
+      rows.push(row)
+      row = []
+    }
+  })
+  if (row.length > 0) rows.push(row)
+  rows.push([['⏭ 用当前模型', 'nw:skip:m'], ['❌ 取消', 'nw:cancel']])
+  return { text: textLines.join('\n'), keyboard: withBack(rows) }
+}
+
+/** 向导第 2 步：选工作方式（无预设时直接创建）。 */
+async function newPresetStep(ctx: MenuCtx): Promise<MenuResult> {
+  let presets: Array<{ id: string; name: string }> = []
+  try { presets = await ctx.listPresets() } catch { presets = [] }
+  if (presets.length === 0) return finishNewSession(ctx)
+  let currentId = ''
+  try { currentId = await ctx.getCurrentPresetId() } catch { currentId = '' }
+  const draft = ctx.draft.read()
+  const chosenModel = draft.model !== undefined
+    ? `（已选模型 \`${draft.model}\`）`
+    : '（沿用当前模型）'
+  const textLines = [
+    '🆕 **新建会话** · 第 2/2 步:选择工作方式',
+    chosenModel,
+  ]
+  const rows: Array<Array<[string, string]>> = []
+  let row: Array<[string, string]> = []
+  presets.slice(0, 30).forEach((preset, i) => {
+    const isCurrent = currentId !== '' && preset.id === currentId
+    textLines.push(`　${i + 1}. ${isCurrent ? '\u2705 ' : ''}\`${preset.name}\``)
+    row.push([`${isCurrent ? '\u2705 ' : ''}${i + 1}`, `nw:p:${i}`])
+    if (row.length === 5) {
+      rows.push(row)
+      row = []
+    }
+  })
+  if (row.length > 0) rows.push(row)
+  rows.push([['⏭ 用当前工作方式', 'nw:skip:p'], ['❌ 取消', 'nw:cancel']])
+  return { text: textLines.join('\n'), keyboard: withBack(rows) }
+}
+
+/** 向导最后一步：落盘选择并创建全新会话。 */
+async function finishNewSession(ctx: MenuCtx): Promise<MenuResult> {
+  const draft = ctx.draft.read()
+  // 先落 per-chat 模型与 agentPreset，再 rotate —— create 时读取这两项。
+  if (draft.provider !== undefined && draft.model !== undefined) {
+    try { await ctx.setModel(draft.provider, draft.model) } catch { /* 非致命:按原模型创建 */ }
+  }
+  if (draft.presetId !== undefined) {
+    try { await ctx.setPreset(draft.presetId) } catch { /* 非致命:按原工作方式创建 */ }
+  }
   const previousSessionId = ctx.sessions.activeSessionId(ctx.chatId, ctx.botId)
-  const binding = await ctx.sessions.rotate(ctx.chatId, ctx.botId)
+  let binding: { sessionId: string; cwd: string }
+  try {
+    binding = await ctx.sessions.rotate(ctx.chatId, ctx.botId)
+  } catch (error) {
+    ctx.draft.reset()
+    const msg = error instanceof Error ? error.message : String(error)
+    return { text: `❌ 新建会话失败: ${msg}`, keyboard: mainMenuKeyboard() }
+  }
+  ctx.draft.reset()
+  let workMode = '默认'
+  try { workMode = await ctx.getCurrentPresetName() } catch { /* keep fallback */ }
+  const model = ctx.getCurrentModel()
   return {
-    text: rotatedText('✅ 已开启新会话(已丢弃当前上下文)', binding, previousSessionId),
+    text: rotatedText('✅ 已开启新会话(已丢弃当前上下文)', binding, previousSessionId, [
+      `• 模型: ${model.provider}/${model.model}`,
+      `• 工作方式: ${workMode}`,
+    ]),
     keyboard: mainMenuKeyboard(),
   }
+}
+
+/** 向导回调分发：nw:m:<i> 选模型 / nw:p:<i> 选工作方式 / nw:skip:* / nw:cancel。 */
+async function handleNewWizard(data: string, ctx: MenuCtx): Promise<MenuResult> {
+  if (data === 'nw:cancel') {
+    ctx.draft.reset()
+    return { text: '已取消新建会话。', keyboard: mainMenuKeyboard() }
+  }
+  if (data === 'nw:skip:m') return newPresetStep(ctx)
+  if (data === 'nw:skip:p') return finishNewSession(ctx)
+  const modelPick = /^nw:m:(\d+)$/.exec(data)
+  if (modelPick !== null) {
+    let models: Array<{ provider: string; model: string }> = []
+    try { models = await ctx.listModels() } catch { models = [] }
+    const hit = models[Number(modelPick[1])]
+    if (hit === undefined) return { text: '❌ 该模型已不可用,请重新选择。', keyboard: mainMenuKeyboard() }
+    ctx.draft.patch({ provider: hit.provider, model: hit.model })
+    return newPresetStep(ctx)
+  }
+  const presetPick = /^nw:p:(\d+)$/.exec(data)
+  if (presetPick !== null) {
+    let presets: Array<{ id: string; name: string }> = []
+    try { presets = await ctx.listPresets() } catch { presets = [] }
+    const hit = presets[Number(presetPick[1])]
+    if (hit === undefined) return { text: '❌ 该工作方式已不可用,请重新选择。', keyboard: mainMenuKeyboard() }
+    ctx.draft.patch({ presetId: hit.id })
+    return finishNewSession(ctx)
+  }
+  return { text: '未知菜单项', keyboard: mainMenuKeyboard() }
 }
 
 /** Status summary text: session / cwd / work mode / model / binding (menu top). */
