@@ -380,12 +380,16 @@ export function apply(ctx: Context, config: TelegramConfig) {
       for (const s of svc?.list?.() ?? []) {
         const id = typeof s?.id === 'string' ? s.id : undefined
         if (id === undefined) continue
+        // 时间与宿主完全一致：updatedAt = max(header.createdAt, lastPromptAt)
+        // （见宿主 api-session-controller/list.js）。只取 lastPromptAt 会让没有
+        // prompt 元数据的插件自建会话显示成 `--`。
+        const header = s?.header as { cwd?: string; origin?: unknown; createdAt?: number } | undefined
         merge({
           id,
-          cwd: s?.header?.cwd,
+          cwd: header?.cwd,
           title: projString(s, 'title'),
-          updatedAt: projNumber(s, 'sessionListMetadata', 'lastPromptAt'),
-          origin: s?.header?.origin,
+          updatedAt: Math.max(header?.createdAt ?? 0, projNumber(s, 'sessionListMetadata', 'lastPromptAt') ?? 0),
+          origin: header?.origin,
         })
       }
     } catch { /* best-effort: the projection cache below still fills the roster */ }
